@@ -5225,14 +5225,18 @@ static int dahdi_chan_ioctl(struct inode *inode, struct file *file, unsigned int
 		if ((j < 0) || (j >= DAHDI_MAX_PRETRAINING))
 			return -EINVAL;
 		j <<= 3;
+		spin_lock_irqsave(&chan->lock, flags);
 		if (chan->ec_state) {
 			/* Start pretraining stage */
-			spin_lock_irqsave(&chan->lock, flags);
-			chan->ec_state->status.mode = ECHO_MODE_PRETRAINING;
-			chan->ec_state->status.pretrain_timer = j;
+			if (chan->ec_state->ops->echocan_traintap) {
+				chan->ec_state->status.mode = ECHO_MODE_PRETRAINING;
+				chan->ec_state->status.pretrain_timer = j;
+			}
 			spin_unlock_irqrestore(&chan->lock, flags);
-		} else
+		} else {
+			spin_unlock_irqrestore(&chan->lock, flags);
 			return -EINVAL;
+		}
 		break;
 	case DAHDI_ECHOCANCEL_FAX_MODE:
 		if (!chan->ec_state) {
@@ -6639,7 +6643,8 @@ static inline void __dahdi_ec_chunk(struct dahdi_chan *ss, unsigned char *rxchun
 					ss->ec_state->status.last_train_tap = 0;
 					ss->ec_state->status.mode = ECHO_MODE_TRAINING;
 				}
-				if (ss->ec_state->status.mode == ECHO_MODE_TRAINING) {
+				if ((ss->ec_state->status.mode == ECHO_MODE_TRAINING) &&
+				    (ss->ec_state->ops->echocan_traintap)) {
 					if (ss->ec_state->ops->echocan_traintap(ss->ec_state, ss->ec_state->status.last_train_tap++, rxlin)) {
 #if 0
 						module_printk(KERN_NOTICE, "Finished training (%d taps trained)!\n", ss->ec_state->status.last_train_tap);

@@ -2,7 +2,7 @@
  * WCB410P  Quad-BRI PCI Driver
  * Written by Andrew Kohlsmith <akohlsmith@mixdown.ca>
  *
- * Copyright (C) 2008 Digium, Inc.
+ * Copyright (C) 2009 Digium, Inc.
  * All rights reserved.
  *
  */
@@ -2486,6 +2486,11 @@ static int b4xxp_proc_read(char *buf, char **start, off_t offset, int count, int
 }
 #endif /* CREATE_WCB4XXP_PROCFS_ENTRY */
 
+static int b4xxp_startdefaultspan(struct b4xxp *b4)
+{
+	struct dahdi_lineconfig lc = {0,};
+	return b4xxp_spanconfig(&b4->spans[0].span, &lc);
+}
 
 static int __devinit b4xx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
@@ -2599,6 +2604,7 @@ static int __devinit b4xx_probe(struct pci_dev *pdev, const struct pci_device_id
 	}
 
 
+
 #if 0
 	/* Launch cards as appropriate */
 	for (;;) {
@@ -2620,6 +2626,10 @@ static int __devinit b4xx_probe(struct pci_dev *pdev, const struct pci_device_id
 #else
 	dev_info(b4->dev, "Did not do the highestorder stuff\n");
 #endif
+
+	ret = b4xxp_startdefaultspan(b4);
+	if (ret)
+		goto err_out_unreg_spans;
 
 	ret = 0;
 	return ret;
