@@ -53,7 +53,10 @@ struct pci_driver te12xp_driver;
 
 int debug = 0;
 static int j1mode = 0;
-static int alarmdebounce = 0;
+static int alarmdebounce = 2500; /* LOF/LFA def to 2.5s AT&T TR54016*/
+static int losalarmdebounce = 2500; /* LOS def to 2.5s AT&T TR54016*/
+static int aisalarmdebounce = 2500; /* AIS(blue) def to 2.5s AT&T TR54016*/
+static int yelalarmdebounce = 500; /* RAI(yellow) def to 0.5s AT&T devguide */
 static int loopback = 0;
 static int t1e1override = -1;
 static int unchannelized = 0;
@@ -84,13 +87,12 @@ struct t1 *ifaces[WC_MAX_IFACES];
 spinlock_t ifacelock = SPIN_LOCK_UNLOCKED;
 
 struct t1_desc {
-	char *name;
-	int flags;
+	const char *name;
 };
 
-static struct t1_desc te120p = { "Wildcard TE120P", 0 };
-static struct t1_desc te122 = { "Wildcard TE122", 0 };
-static struct t1_desc te121 = { "Wildcard TE121", 0 };
+static const struct t1_desc te120p = {"Wildcard TE120P"};
+static const struct t1_desc te122 = {"Wildcard TE122"};
+static const struct t1_desc te121 = {"Wildcard TE121"};
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static kmem_cache_t *cmd_cache;
@@ -490,7 +492,6 @@ static void cmd_dequeue_vpmadt032(struct t1 *wc, unsigned char *writechunk, int 
 			writechunk[CMD_BYTE(4, 2, 1)] = 0;
 		}
 	} else if (test_and_clear_bit(VPM150M_SWRESET, &vpm->control)) {
-		debug_printk(1, "Booting  VPMADT032\n");
 		for (x = 0; x < 7; x++) {
 			if (0 == x)  {
 				writechunk[CMD_BYTE(x, 0, 1)] = (0x8 << 4);
@@ -729,7 +730,7 @@ static void t1_configure_t1(struct t1 *wc, int lineconfig, int txlevel)
 	else
 		mytxlevel = txlevel - 4;
 	fmr1 = 0x9e; /* FMR1: Mode 0, T1 mode, CRC on for ESF, 2.048 Mhz system data rate, no XAIS */
-	fmr2 = 0x22; /* FMR2: no payload loopback, auto send yellow alarm */
+	fmr2 = 0x20; /* FMR2: no payload loopback, don't auto yellow alarm */
 	if (loopback)
 		fmr2 |= 0x4;
 
@@ -1188,7 +1189,7 @@ static void echocan_free(struct dahdi_chan *chan, struct dahdi_echocan_state *ec
 	if (!wc->vpmadt032)
 		return;
 
-	vpmadt032_echocan_free(wc->vpmadt032, chan, ec);
+	vpmadt032_echocan_free(wc->vpmadt032, chan->chanpos - 1, ec);
 }
 
 static void set_span_devicetype(struct t1 *wc)
@@ -1487,16 +1488,48 @@ static inline void t1_check_alarms(struct t1 *wc)
 			alarms |= DAHDI_ALARM_NOTOPEN;
 	}
 
-	if (c & 0xa0) {
-		if (wc->alarmcount >= alarmdebounce) {
-			if (!unchannelized)
-				alarms |= DAHDI_ALARM_RED;
-		} else
+	if (c & 0x20) { /* LOF/LFA */
+		if (wc->alarmcount >= (alarmdebounce/100))
+			alarms |= DAHDI_ALARM_RED;
+		else {
+			if (unlikely(debug && !wc->alarmcount)) {
+				/* starting to debounce LOF/LFA */
+				t1_info(wc, "LOF/LFA detected but "
+					"debouncing for %d ms\n",
+					alarmdebounce);
+			}
 			wc->alarmcount++;
+		}
 	} else
 		wc->alarmcount = 0;
-	if (c & 0x4)
-		alarms |= DAHDI_ALARM_BLUE;
+
+	if (c & 0x80) { /* LOS */
+		if (wc->losalarmcount >= (losalarmdebounce/100))
+			alarms |= DAHDI_ALARM_RED;
+		else {
+			if (unlikely(debug && !wc->losalarmcount)) {
+				/* starting to debounce LOS */
+				t1_info(wc, "LOS detected but debouncing "
+					"for %d ms\n", losalarmdebounce);
+			}
+			wc->losalarmcount++;
+		}
+	} else
+		wc->losalarmcount = 0;
+
+	if (c & 0x40) { /* AIS */
+		if (wc->aisalarmcount >= (aisalarmdebounce/100))
+			alarms |= DAHDI_ALARM_BLUE;
+		else {
+			if (unlikely(debug && !wc->aisalarmcount)) {
+				/* starting to debounce AIS */
+				t1_info(wc, "AIS detected but debouncing "
+					"for %d ms\n", aisalarmdebounce);
+			}
+			wc->aisalarmcount++;
+		}
+	} else
+		wc->aisalarmcount = 0;
 
 	/* Keep track of recovering */
 	if ((!alarms) && wc->span.alarms) 
@@ -1517,9 +1550,26 @@ static inline void t1_check_alarms(struct t1 *wc)
 		t1_setreg_full(wc, 0x20, fmr4 & ~0x20, NOT_VPM);
 		wc->flags.sendingyellow = 0;
 	}
-	
+	/*
 	if ((c & 0x10) && !unchannelized)
 		alarms |= DAHDI_ALARM_YELLOW;
+	*/
+
+	if ((c & 0x10) && !unchannelized) { /* receiving yellow (RAI) */
+		if (wc->yelalarmcount >= (yelalarmdebounce/100))
+			alarms |= DAHDI_ALARM_YELLOW;
+		else {
+			if (unlikely(debug && !wc->yelalarmcount)) {
+				/* starting to debounce AIS */
+				t1_info(wc, "yelllow (RAI) detected but "
+					"debouncing for %d ms\n",
+					yelalarmdebounce);
+			}
+			wc->yelalarmcount++;
+		}
+	} else
+		wc->yelalarmcount = 0;
+
 	if (wc->span.mainttimer || wc->span.maintstat) 
 		alarms |= DAHDI_ALARM_LOOPBACK;
 	wc->span.alarms = alarms;
@@ -1685,13 +1735,13 @@ static void timer_work_func(struct work_struct *work)
 {
 	struct t1 *wc = container_of(work, struct t1, timer_work);
 #endif
-	/* Called once every 100ms */
+	/* Called once every 100 ms */
 	if (unlikely(!test_bit(INITIALIZED, &wc->bit_flags)))
 		return;
 	t1_do_counters(wc);
 	t1_check_alarms(wc);
 	t1_check_sigbits(wc);
-	mod_timer(&wc->timer, jiffies + HZ/5);
+	mod_timer(&wc->timer, jiffies + HZ/10);
 }
 
 static void
@@ -1708,7 +1758,6 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	struct t1_desc *d = (struct t1_desc *) ent->driver_data;
 	unsigned int x;
 	int res;
-	int startinglatency;
 	unsigned int index = -1;
 
 	for (x = 0; x < sizeof(ifaces) / sizeof(ifaces[0]); x++) {
@@ -1723,7 +1772,6 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 		return -EIO;
 	}
 	
-retry:
 	if (!(wc = kmalloc(sizeof(*wc), GFP_KERNEL))) {
 		return -ENOMEM;
 	}
@@ -1763,13 +1811,12 @@ retry:
 		return res;
 	}
 	
-	/* Keep track of which device we are */
-	pci_set_drvdata(pdev, wc);
 	if (VOICEBUS_DEFAULT_LATENCY != latency) {
 		voicebus_set_minlatency(wc->vb, latency);
 	}
+
+	voicebus_lock_latency(wc->vb);
 	voicebus_start(wc->vb);
-	startinglatency = voicebus_current_latency(wc->vb);
 	t1_hardware_post_init(wc);
 
 	for (x = 0; x < (wc->spantype == TYPE_E1 ? 31 : 24); x++) {
@@ -1789,31 +1836,14 @@ retry:
 
 	mod_timer(&wc->timer, jiffies + HZ/5);
 	t1_software_init(wc);
-	if (voicebus_current_latency(wc->vb) > startinglatency) {
-		/* The voicebus library increased the latency during
-		 * initialization because the host wasn't able to service the
-		 * interrupts from the adapter quickly enough.  In this case,
-		 * we'll increase our latency and restart the initialization.
-		 */
-		printk(KERN_NOTICE "%s: Restarting board initialization " \
-		 "after increasing latency.\n", wc->name);
-		latency = voicebus_current_latency(wc->vb);
-		dahdi_unregister(&wc->span);
-		voicebus_release(wc->vb);
-		wc->vb = NULL;
-		free_wc(wc);
-		wc = NULL;
-		goto retry;
-	}
-
 	module_printk("Found a %s\n", wc->variety);
-
+	voicebus_unlock_latency(wc->vb);
 	return 0;
 }
 
 static void __devexit te12xp_remove_one(struct pci_dev *pdev)
 {
-	struct t1 *wc = pci_get_drvdata(pdev);
+	struct t1 *wc = voicebus_pci_dev_to_context(pdev);
 #ifdef VPM_SUPPORT
 	unsigned long flags;
 	struct vpmadt032 *vpm = wc->vpmadt032;
@@ -1902,6 +1932,9 @@ module_param(loopback, int, S_IRUGO | S_IWUSR);
 module_param(t1e1override, int, S_IRUGO | S_IWUSR);
 module_param(j1mode, int, S_IRUGO | S_IWUSR);
 module_param(alarmdebounce, int, S_IRUGO | S_IWUSR);
+module_param(losalarmdebounce, int, S_IRUGO | S_IWUSR);
+module_param(aisalarmdebounce, int, S_IRUGO | S_IWUSR);
+module_param(yelalarmdebounce, int, S_IRUGO | S_IWUSR);
 module_param(latency, int, S_IRUGO | S_IWUSR);
 #ifdef VPM_SUPPORT
 module_param(vpmsupport, int, S_IRUGO | S_IWUSR);

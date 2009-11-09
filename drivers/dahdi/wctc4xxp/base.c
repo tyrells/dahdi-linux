@@ -3400,19 +3400,16 @@ wctc4xxp_add_to_device_list(struct wcdte *wc)
 struct wctc4xxp_desc {
 	const char *short_name;
 	const char *long_name;
-	int flags;
 };
 
 static struct wctc4xxp_desc wctc400p = {
 	.short_name = "tc400b",
 	.long_name = "Wildcard TC400P+TC400M",
-	.flags = 0,
 };
 
 static struct wctc4xxp_desc wctce400 = {
 	.short_name = "tce400",
 	.long_name = "Wildcard TCE400+TC400M",
-	.flags = 0,
 };
 
 static int __devinit
@@ -3475,7 +3472,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	init_waitqueue_head(&wc->waitq);
 
-	if (pci_set_dma_mask(wc->pdev, DMA_32BIT_MASK)) {
+	if (pci_set_dma_mask(wc->pdev, DMA_BIT_MASK(32))) {
 		release_region(wc->iobase, 0xff);
 		DTE_PRINTK(WARNING, "No suitable DMA available.\n");
 		return -EIO;

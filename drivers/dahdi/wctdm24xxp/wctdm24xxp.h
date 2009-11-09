@@ -141,7 +141,7 @@ enum battery_state {
 };
 
 struct wctdm {
-	char *variety;
+	const struct wctdm_desc *desc;
 	char board_name[80];
 	struct dahdi_span span;
 	unsigned char ios;
@@ -202,7 +202,17 @@ struct wctdm {
 			int debounce;
 			int ohttimer;
 			int idletxhookstate;	/* IDLE changing hook state */
-			int lasttxhook;		/* Bits 0-3 are written to proslic reg 64, Bit 4 indicates if the last write is pending */
+	/* lasttxhook reflects the last value written to the proslic's reg
+	* 64 (LINEFEED_CONTROL) in bits 0-2.  Bit 4 indicates if the last
+	* write is pending i.e. it is in process of being written to the
+	* register
+	* NOTE: in order for this value to actually be written to the
+	* proslic, the appropriate matching value must be written into the
+	* sethook variable so that it gets queued and handled by the
+	* voicebus ISR.
+	*/
+			int lasttxhook;
+			spinlock_t lasttxhooklock;
 			int palarms;
 			struct dahdi_vmwi_info vmwisetting;
 			int vmwi_active_messages;
@@ -217,16 +227,8 @@ struct wctdm {
 	/* Set hook */
 	int sethook[NUM_CARDS + NUM_EC];
  	int dacssrc[NUM_CARDS];
-	/* Type is the maximum number of FXO/FXS ports supported */
- 	int type;
 
 	int vpm100;
-
-	unsigned long dtmfactive;
-	unsigned long dtmfmask;
-	unsigned long dtmfmutemask;
-	short dtmfenergy[NUM_CARDS];
-	short dtmfdigit[NUM_CARDS];
 
 	struct vpmadt032 *vpmadt032;
 #ifdef FANCY_ECHOCAN

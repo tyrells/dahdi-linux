@@ -78,6 +78,10 @@
 
 #include "hpec/hpec_user.h"
 
+#if defined(EMPULSE) && defined(EMFLASH)
+#error "You cannot define both EMPULSE and EMFLASH"
+#endif
+
 /* Get helper arithmetic */
 #include "arith.h"
 #if defined(CONFIG_DAHDI_MMX) || defined(ECHO_CAN_FP)
@@ -183,13 +187,6 @@ static struct class_simple *dahdi_class = NULL;
 #define class_create class_simple_create
 #define class_destroy class_simple_destroy
 #endif
-
-/*
- * See issue http://bugs.digium.com/view.php?id=13504 for more information. 
- * on why reference counting on the echo canceller modules is disabled
- * currently.
- */
-#undef USE_ECHOCAN_REFCOUNT 
 
 static int deftaps = 64;
 
@@ -397,13 +394,14 @@ static LIST_HEAD(ecfactory_list);
 
 struct ecfactory {
 	const struct dahdi_echocan_factory *ec;
-	struct module *owner;
 	struct list_head list;
 };
 
 int dahdi_register_echocan_factory(const struct dahdi_echocan_factory *ec)
 {
 	struct ecfactory *cur;
+
+	WARN_ON(!ec->owner);
 
 	write_lock(&ecfactory_list_lock);
 
@@ -1122,18 +1120,13 @@ retry:
 
 	list_for_each_entry(cur, &ecfactory_list, list) {
 		if (!strcmp(name_upper, cur->ec->name)) {
-#ifdef USE_ECHOCAN_REFCOUNT
-			if (try_module_get(cur->owner)) {
+			if (try_module_get(cur->ec->owner)) {
 				read_unlock(&ecfactory_list_lock);
 				return cur->ec;
 			} else {
 				read_unlock(&ecfactory_list_lock);
 				return NULL;
 			}
-#else
-			read_unlock(&ecfactory_list_lock);
-			return cur->ec;
-#endif
 		}
 	}
 
@@ -1159,10 +1152,8 @@ retry:
 
 static void release_echocan(const struct dahdi_echocan_factory *ec)
 {
-#ifdef USE_ECHOCAN_REFCOUNT
 	if (ec)
 		module_put(ec->owner);
-#endif
 }
 
 /** 
@@ -1878,6 +1869,8 @@ static void dahdi_chan_unreg(struct dahdi_chan *chan)
 
 	might_sleep();
 
+	release_echocan(chan->ec_factory);
+
 #ifdef CONFIG_DAHDI_NET
 	if (chan->flags & DAHDI_FLAG_NETDEV) {
 		unregister_hdlc_device(chan->hdlcnetdev->netdev);
@@ -2304,7 +2297,7 @@ static void dahdi_rbs_sethook(struct dahdi_chan *chan, int txsig, int txstate,
 	if (!chan->span)
 		return;
 
-	if (!chan->span->flags & DAHDI_FLAG_RBS) {
+	if (!(chan->span->flags & DAHDI_FLAG_RBS)) {
 		module_printk(KERN_NOTICE, "dahdi_rbs: Tried to set RBS hook state on non-RBS channel %s\n", chan->name);
 		return;
 	}
@@ -3462,16 +3455,136 @@ static int dahdi_timer_ioctl(struct inode *node, struct file *file, unsigned int
 	return 0;
 }
 
+static int dahdi_ioctl_getgains(struct inode *node, struct file *file,
+				unsigned int cmd, unsigned long data, int unit)
+{
+	int res = 0;
+	struct dahdi_gains *gain;
+	int i, j;
+
+	gain = kzalloc(sizeof(*gain), GFP_KERNEL);
+	if (!gain)
+		return -ENOMEM;
+
+	if (copy_from_user(gain, (struct dahdi_gains *)data, sizeof(*gain))) {
+		res = -EFAULT;
+		goto cleanup;
+	}
+	i = gain->chan;  /* get channel no */
+	   /* if zero, use current channel no */
+	if (!i)
+		i = unit;
+
+	  /* make sure channel number makes sense */
+	if ((i < 0) || (i > DAHDI_MAX_CHANNELS) || !chans[i]) {
+		res = -EINVAL;
+		goto cleanup;
+	}
+
+	if (!(chans[i]->flags & DAHDI_FLAG_AUDIO)) {
+		res = -EINVAL;
+		goto cleanup;
+	}
+	gain->chan = i; /* put the span # in here */
+	for (j = 0; j < 256; ++j)  {
+		gain->txgain[j] = chans[i]->txgain[j];
+		gain->rxgain[j] = chans[i]->rxgain[j];
+	}
+	if (copy_to_user((struct dahdi_gains *)data, gain, sizeof(*gain))) {
+		res = -EFAULT;
+		goto cleanup;
+	}
+cleanup:
+
+	kfree(gain);
+	return res;
+}
+
+static int dahdi_ioctl_setgains(struct inode *node, struct file *file,
+				unsigned int cmd, unsigned long data, int unit)
+{
+	int res = 0;
+	struct dahdi_gains *gain;
+	unsigned char *txgain, *rxgain;
+	int i, j;
+	unsigned long flags;
+	const int GAIN_TABLE_SIZE = sizeof(defgain);
+
+	gain = kzalloc(sizeof(*gain), GFP_KERNEL);
+	if (!gain)
+		return -ENOMEM;
+
+	if (copy_from_user(gain, (struct dahdi_gains *)data, sizeof(*gain))) {
+		res = -EFAULT;
+		goto cleanup;
+	}
+	i = gain->chan;  /* get channel no */
+	   /* if zero, use current channel no */
+	if (!i)
+		i = unit;
+	  /* make sure channel number makes sense */
+	if ((i < 0) || (i > DAHDI_MAX_CHANNELS) || !chans[i]) {
+		res = -EINVAL;
+		goto cleanup;
+	}
+	if (!(chans[i]->flags & DAHDI_FLAG_AUDIO)) {
+		res = -EINVAL;
+		goto cleanup;
+	}
+
+	rxgain = kzalloc(GAIN_TABLE_SIZE*2, GFP_KERNEL);
+	if (!rxgain) {
+		res = -ENOMEM;
+		goto cleanup;
+	}
+
+	gain->chan = i; /* put the span # in here */
+	txgain = rxgain + GAIN_TABLE_SIZE;
+
+	for (j = 0; j < GAIN_TABLE_SIZE; ++j) {
+		rxgain[j] = gain->rxgain[j];
+		txgain[j] = gain->txgain[j];
+	}
+
+	if (!memcmp(rxgain, defgain, GAIN_TABLE_SIZE) &&
+	    !memcmp(txgain, defgain, GAIN_TABLE_SIZE)) {
+		kfree(rxgain);
+		spin_lock_irqsave(&chans[i]->lock, flags);
+		if (chans[i]->gainalloc)
+			kfree(chans[i]->rxgain);
+		chans[i]->gainalloc = 0;
+		chans[i]->rxgain = defgain;
+		chans[i]->txgain = defgain;
+		spin_unlock_irqrestore(&chans[i]->lock, flags);
+	} else {
+		/* This is a custom gain setting */
+		spin_lock_irqsave(&chans[i]->lock, flags);
+		if (chans[i]->gainalloc)
+			kfree(chans[i]->rxgain);
+		chans[i]->gainalloc = 1;
+		chans[i]->rxgain = rxgain;
+		chans[i]->txgain = txgain;
+		spin_unlock_irqrestore(&chans[i]->lock, flags);
+	}
+
+	if (copy_to_user((struct dahdi_gains *)data, gain, sizeof(*gain))) {
+		res = -EFAULT;
+		goto cleanup;
+	}
+cleanup:
+
+	kfree(gain);
+	return res;
+}
+
 static int dahdi_common_ioctl(struct inode *node, struct file *file, unsigned int cmd, unsigned long data, int unit)
 {
 	union {
-		struct dahdi_gains gain;
 		struct dahdi_spaninfo spaninfo;
 		struct dahdi_params param;
 	} stack;
 	struct dahdi_chan *chan;
 	unsigned long flags;
-	unsigned char *txgain, *rxgain;
 	int i,j;
 	int return_master = 0;
 	size_t size_to_copy;
@@ -3597,68 +3710,9 @@ static int dahdi_common_ioctl(struct inode *node, struct file *file, unsigned in
 		break;
 	case DAHDI_GETGAINS_V1: /* Intentional drop through. */
 	case DAHDI_GETGAINS:  /* get gain stuff */
-		if (copy_from_user(&stack.gain,(struct dahdi_gains *) data,sizeof(stack.gain)))
-			return -EFAULT;
-		i = stack.gain.chan;  /* get channel no */
-		   /* if zero, use current channel no */
-		if (!i) i = unit;
-		  /* make sure channel number makes sense */
-		if ((i < 0) || (i > DAHDI_MAX_CHANNELS) || !chans[i]) return(-EINVAL);
-
-		if (!(chans[i]->flags & DAHDI_FLAG_AUDIO)) return (-EINVAL);
-		stack.gain.chan = i; /* put the span # in here */
-		for (j=0;j<256;j++)  {
-			stack.gain.txgain[j] = chans[i]->txgain[j];
-			stack.gain.rxgain[j] = chans[i]->rxgain[j];
-		}
-		if (copy_to_user((struct dahdi_gains *) data,&stack.gain,sizeof(stack.gain)))
-			return -EFAULT;
-		break;
+		return dahdi_ioctl_getgains(node, file, cmd, data, unit);
 	case DAHDI_SETGAINS:  /* set gain stuff */
-		if (copy_from_user(&stack.gain,(struct dahdi_gains *) data,sizeof(stack.gain)))
-			return -EFAULT;
-		i = stack.gain.chan;  /* get channel no */
-		   /* if zero, use current channel no */
-		if (!i) i = unit;
-		  /* make sure channel number makes sense */
-		if ((i < 0) || (i > DAHDI_MAX_CHANNELS) || !chans[i]) return(-EINVAL);
-		if (!(chans[i]->flags & DAHDI_FLAG_AUDIO)) return (-EINVAL);
-
-		if (!(rxgain = kmalloc(512, GFP_KERNEL)))
-			return -ENOMEM;
-
-		stack.gain.chan = i; /* put the span # in here */
-		txgain = rxgain + 256;
-
-		for (j=0;j<256;j++) {
-			rxgain[j] = stack.gain.rxgain[j];
-			txgain[j] = stack.gain.txgain[j];
-		}
-
-		if (!memcmp(rxgain, defgain, 256) &&
-		    !memcmp(txgain, defgain, 256)) {
-			if (rxgain)
-				kfree(rxgain);
-			spin_lock_irqsave(&chans[i]->lock, flags);
-			if (chans[i]->gainalloc)
-				kfree(chans[i]->rxgain);
-			chans[i]->gainalloc = 0;
-			chans[i]->rxgain = defgain;
-			chans[i]->txgain = defgain;
-			spin_unlock_irqrestore(&chans[i]->lock, flags);
-		} else {
-			/* This is a custom gain setting */
-			spin_lock_irqsave(&chans[i]->lock, flags);
-			if (chans[i]->gainalloc)
-				kfree(chans[i]->rxgain);
-			chans[i]->gainalloc = 1;
-			chans[i]->rxgain = rxgain;
-			chans[i]->txgain = txgain;
-			spin_unlock_irqrestore(&chans[i]->lock, flags);
-		}
-		if (copy_to_user((struct dahdi_gains *) data,&stack.gain,sizeof(stack.gain)))
-			return -EFAULT;
-		break;
+		return dahdi_ioctl_setgains(node, file, cmd, data, unit);
 	case DAHDI_SPANSTAT:
 		size_to_copy = sizeof(struct dahdi_spaninfo);
 		if (copy_from_user(&stack.spaninfo, (struct dahdi_spaninfo *) data, size_to_copy))
@@ -3877,6 +3931,13 @@ static int dahdi_ctl_ioctl(struct inode *inode, struct file *file, unsigned int 
 				spin_lock_irqsave(&spans[j]->chans[x]->lock, flags);
 				dahdi_hangup(spans[j]->chans[x]);
 				spin_unlock_irqrestore(&spans[j]->chans[x]->lock, flags);
+				/*
+				 * Set the rxhooksig back to
+				 * DAHDI_RXSIG_INITIAL so that new events are
+				 * queued on the channel with the actual
+				 * recieved hook state.
+				 * 
+				 */
 				spans[j]->chans[x]->rxhooksig = DAHDI_RXSIG_INITIAL;
 			}
 		}
@@ -3972,9 +4033,6 @@ static int dahdi_ctl_ioctl(struct inode *inode, struct file *file, unsigned int 
 		if ((sigcap & ch.sigtype) != ch.sigtype)
 			res = -EINVAL;
 
-		if (!res && chans[ch.chan]->span->chanconfig)
-			res = chans[ch.chan]->span->chanconfig(chans[ch.chan], ch.sigtype);
-
 		if (chans[ch.chan]->master != chans[ch.chan]) {
 			struct dahdi_chan *oldmaster = chans[ch.chan]->master;
 
@@ -4045,6 +4103,12 @@ static int dahdi_ctl_ioctl(struct inode *inode, struct file *file, unsigned int 
 			else
 				chans[ch.chan]->flags &= ~DAHDI_FLAG_MTP2;
 		}
+
+		if (!res && chans[ch.chan]->span->chanconfig) {
+			res = chans[ch.chan]->span->chanconfig(chans[ch.chan],
+							       ch.sigtype);
+		}
+
 #ifdef CONFIG_DAHDI_NET
 		if (!res &&
 		    (newmaster == chans[ch.chan]) &&
@@ -4963,14 +5027,12 @@ static int ioctl_echocancel(struct dahdi_chan *chan, struct dahdi_echocanparams 
 		ret = chan->span->echocan_create(chan, ecp, params, &ec);
 
 	if ((ret == -ENODEV) && chan->ec_factory) {
-#ifdef USE_ECHOCAN_REFCOUNT
 		/* try to get another reference to the module providing
 		   this channel's echo canceler */
 		if (!try_module_get(chan->ec_factory->owner)) {
 			module_printk(KERN_ERR, "Cannot get a reference to the '%s' echo canceler\n", chan->ec_factory->name);
 			goto exit_with_free;
 		}
-#endif
 
 		/* got the reference, copy the pointer and use it for making
 		   an echo canceler instance if possible */
@@ -7939,6 +8001,7 @@ static void coretimer_func(unsigned long param)
 	const unsigned long MAX_INTERVAL = 100000L;
 	const unsigned long FOURMS_INTERVAL = HZ/250;
 	const unsigned long ONESEC_INTERVAL = HZ;
+	const unsigned long MS_LIMIT = 3000;
 
 	now = current_kernel_time();
 
@@ -7953,6 +8016,23 @@ static void coretimer_func(unsigned long param)
 			mod_timer(&core_timer.timer, jiffies + FOURMS_INTERVAL);
 
 		ms_since_start = core_diff_ms(&core_timer.start_interval, &now);
+
+		/*
+		 * If the system time has changed, it is possible for us to be
+		 * far behind.  If we are more than MS_LIMIT milliseconds
+		 * behind, just reset our time base and continue so that we do
+		 * not hang the system here.
+		 *
+		 */
+		if (unlikely((ms_since_start - atomic_read(&core_timer.count)) > MS_LIMIT)) {
+			if (printk_ratelimit())
+				module_printk(KERN_INFO, "Detected time shift.\n");
+			atomic_set(&core_timer.count, 0);
+			atomic_set(&core_timer.last_count, 0);
+			core_timer.start_interval = now;
+			return;
+		}
+
 		while (ms_since_start > atomic_read(&core_timer.count))
 			process_masterspan();
 

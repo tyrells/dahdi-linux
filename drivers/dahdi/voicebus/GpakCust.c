@@ -370,10 +370,9 @@ int vpmadt032_echocan_create(struct vpmadt032 *vpm, int channo,
 }
 EXPORT_SYMBOL(vpmadt032_echocan_create);
 
-void vpmadt032_echocan_free(struct vpmadt032 *vpm, struct dahdi_chan *chan,
+void vpmadt032_echocan_free(struct vpmadt032 *vpm, int channo,
 	struct dahdi_echocan_state *ec)
 {
-	int channo = chan->chanpos - 1;
 	adt_lec_init_defaults(&vpm->desiredecstate[channo], 0);
 	vpm->desiredecstate[channo].nlp_type = vpm->options.vpmnlptype;
 	vpm->desiredecstate[channo].nlp_threshold = vpm->options.vpmnlpthresh;
@@ -525,8 +524,9 @@ vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
 		return res;
 	}
 	vpm->curpage = -1;
-	set_bit(VPM150M_SWRESET, &vpm->control);
 
+	dev_info(&voicebus_get_pci_dev(vb)->dev, "Booting VPMADT032\n");
+	set_bit(VPM150M_SWRESET, &vpm->control);
 	while (test_bit(VPM150M_SWRESET, &vpm->control))
 		msleep(1);
 
@@ -565,7 +565,7 @@ void vpmadt032_get_default_parameters(struct GpakEcanParms *p)
 	p->EcanDblTalkThresh = 6;
 	p->EcanMaxDoubleTalkThres = 40;
 	p->EcanNlpThreshold = DEFAULT_NLPTHRESH;
-	p->EcanNlpConv = 0;
+	p->EcanNlpConv = 18;
 	p->EcanNlpUnConv = 12;
 	p->EcanNlpMaxSuppress = DEFAULT_NLPMAXSUPP;
 	p->EcanCngThreshold = 43;

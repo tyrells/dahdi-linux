@@ -113,7 +113,10 @@ struct t1 {
 	} flags;
 	unsigned char txsigs[16];  /* Copy of tx sig registers */
 	int alarmcount;			/* How much red alarm we've seen */
-	char *variety;
+	int losalarmcount;
+	int aisalarmcount;
+	int yelalarmcount;
+	const char *variety;
 	char name[80];
 	unsigned long blinktimer;
 	int loopupcnt;
@@ -144,7 +147,7 @@ struct t1 {
 	struct work_struct timer_work;
 };
 
-
-int schluffen(wait_queue_head_t *q);
+#define t1_info(t1, format, arg...)         \
+        dev_info(&voicebus_get_pci_dev(t1->vb)->dev , format , ## arg)
 
 #endif
