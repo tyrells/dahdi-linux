@@ -1932,9 +1932,11 @@ module_param(loopback, int, S_IRUGO | S_IWUSR);
 module_param(t1e1override, int, S_IRUGO | S_IWUSR);
 module_param(j1mode, int, S_IRUGO | S_IWUSR);
 module_param(alarmdebounce, int, S_IRUGO | S_IWUSR);
+#if 0 /* Don't export these parameters by default on the 2.2 branch */
 module_param(losalarmdebounce, int, S_IRUGO | S_IWUSR);
 module_param(aisalarmdebounce, int, S_IRUGO | S_IWUSR);
 module_param(yelalarmdebounce, int, S_IRUGO | S_IWUSR);
+#endif
 module_param(latency, int, S_IRUGO | S_IWUSR);
 #ifdef VPM_SUPPORT
 module_param(vpmsupport, int, S_IRUGO | S_IWUSR);

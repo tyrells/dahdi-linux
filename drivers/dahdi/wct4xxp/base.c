@@ -4000,9 +4000,11 @@ module_param(noburst, int, 0600);
 module_param(timingcable, int, 0600);
 module_param(t1e1override, int, 0600);
 module_param(alarmdebounce, int, 0600);
+#if 0 /* Don't export these parameters by default on the 2.2 branch */
 module_param(losalarmdebounce, int, 0600);
 module_param(aisalarmdebounce, int, 0600);
 module_param(yelalarmdebounce, int, 0600);
+#endif
 module_param(j1mode, int, 0600);
 module_param(sigmode, int, 0600);
 #ifdef VPM_SUPPORT
