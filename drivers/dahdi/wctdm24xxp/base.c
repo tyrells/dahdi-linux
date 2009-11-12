@@ -312,18 +312,8 @@ void setchanconfig_from_state(struct vpmadt032 *vpm, int channel, GpakChannelCon
 	chanconfig->MuteToneB = Disabled;
 	chanconfig->FaxCngDetB = Disabled;
 
-	switch (vpm->span->deflaw) {
-	case DAHDI_LAW_MULAW:
-		chanconfig->SoftwareCompand = cmpPCMU;
-		break;
-	case DAHDI_LAW_ALAW:
-		chanconfig->SoftwareCompand = cmpPCMA;
-		break;
-	default:
-		chanconfig->SoftwareCompand = cmpPCMU;
-		break;
-	}
-		
+	chanconfig->SoftwareCompand = (ADT_COMP_ALAW == vpm->companding) ?
+						cmpPCMA : cmpPCMU;
 	chanconfig->FrameRate = rate2ms;
 	p = &chanconfig->EcanParametersA;
 
@@ -338,7 +328,7 @@ void setchanconfig_from_state(struct vpmadt032 *vpm, int channel, GpakChannelCon
 		sizeof(chanconfig->EcanParametersB));
 }
 
-static int config_vpmadt032(struct vpmadt032 *vpm)
+static int config_vpmadt032(struct vpmadt032 *vpm, struct wctdm *wc)
 {
 	int res, i;
 	GpakPortConfig_t portconfig = {0};
@@ -427,12 +417,12 @@ static int config_vpmadt032(struct vpmadt032 *vpm)
 		return -1;
 	}
 
-	for (i = 0; i < vpm->span->channels; ++i) {
+	for (i = 0; i < vpm->options.channels; ++i) {
 		vpm->curecstate[i].tap_length = 0;
 		vpm->curecstate[i].nlp_type = vpm->options.vpmnlptype;
 		vpm->curecstate[i].nlp_threshold = vpm->options.vpmnlpthresh;
 		vpm->curecstate[i].nlp_max_suppress = vpm->options.vpmnlpmaxsupp;
-		memcpy(&vpm->desiredecstate[i], &vpm->curecstate[i], sizeof(vpm->curecstate[i]));
+		vpm->curecstate[i].companding = (wc->span.deflaw == DAHDI_LAW_MULAW) ? ADT_COMP_ULAW : ADT_COMP_ALAW;
 
 		/* set_vpmadt032_chanconfig_from_state(&vpm->curecstate[i], &vpm->options, i, &chanconfig); !!! */
 		vpm->setchanconfig_from_state(vpm, i, &chanconfig);
@@ -446,6 +436,11 @@ static int config_vpmadt032(struct vpmadt032 *vpm)
 		}
 
 		if ((res = gpakAlgControl(vpm->dspid, i, BypassEcanA, &algstatus))) {
+			printk(KERN_NOTICE "Unable to disable echo can on channel %d (reason %d:%d)\n", i + 1, res, algstatus);
+			return -1;
+		}
+
+		if ((res = gpakAlgControl(vpm->dspid, i, BypassSwCompanding, &algstatus))) {
 			printk(KERN_NOTICE "Unable to disable echo can on channel %d (reason %d:%d)\n", i + 1, res, algstatus);
 			return -1;
 		}
@@ -566,11 +561,6 @@ static inline void cmd_dequeue_vpmadt032(struct wctdm *wc, u8 *writechunk, int w
 	/* Add our leds in */
 	for (x = 24; x < 28; x++) {
 		writechunk[CMD_BYTE(x, 0, 0)] |= leds;
-	}
-
-	/* Now let's figure out if we need to check for DTMF */
-	if (test_bit(VPM150M_ACTIVE, &vpmadt032->control) && !whichframe && !(wc->intcount % 100)) {
-		schedule_work(&vpmadt032->work);
 	}
 }
 
@@ -3677,8 +3667,7 @@ retry:
 			return -ENOMEM;
 
 		wc->vpmadt032->setchanconfig_from_state = setchanconfig_from_state;
-		wc->vpmadt032->context = wc;
-		wc->vpmadt032->span = &wc->span;
+		wc->vpmadt032->options.channels = wc->span.channels;
 		get_default_portconfig(&portconfig);
 		res = vpmadt032_init(wc->vpmadt032, wc->vb);
 		if (res) {
@@ -3689,7 +3678,7 @@ retry:
 
 		/* Now we need to configure the VPMADT032 module for this
 		 * particular board. */
-		res = config_vpmadt032(wc->vpmadt032);
+		res = config_vpmadt032(wc->vpmadt032, wc);
 		if (res) {
 			vpmadt032_free(wc->vpmadt032);
 			wc->vpmadt032 = NULL;

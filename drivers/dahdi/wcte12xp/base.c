@@ -260,7 +260,7 @@ inline void cmd_decipher_vpmadt032(struct t1 *wc, unsigned char *readchunk)
 	}
 }
 
-static int config_vpmadt032(struct vpmadt032 *vpm)
+static int config_vpmadt032(struct vpmadt032 *vpm, struct t1 *wc)
 {
 	int res, channel;
 	GpakPortConfig_t portconfig = {0};
@@ -349,12 +349,12 @@ static int config_vpmadt032(struct vpmadt032 *vpm)
 		return -1;
 	}
 
-	for (channel = 0; channel < MAX_CHANNELS_PER_SPAN; ++channel) {
+	for (channel = 0; channel < ARRAY_SIZE(vpm->curecstate); ++channel) {
 		vpm->curecstate[channel].tap_length = 0;
 		vpm->curecstate[channel].nlp_type = vpm->options.vpmnlptype;
 		vpm->curecstate[channel].nlp_threshold = vpm->options.vpmnlpthresh;
 		vpm->curecstate[channel].nlp_max_suppress = vpm->options.vpmnlpmaxsupp;
-		memcpy(&vpm->desiredecstate[channel], &vpm->curecstate[channel], sizeof(vpm->curecstate[channel]));
+		vpm->curecstate[channel].companding = (wc->spantype == TYPE_T1) ? ADT_COMP_ULAW : ADT_COMP_ALAW;
 
 		vpm->setchanconfig_from_state(vpm, channel, &chanconfig);
 		if ((res = gpakConfigureChannel(vpm->dspid, channel, tdmToTdm, &chanconfig, &cstatus))) {
@@ -527,11 +527,6 @@ static void cmd_dequeue_vpmadt032(struct t1 *wc, unsigned char *writechunk, int 
 		}
 	}
 #endif
-
-	/* Now let's figure out if we need to check for DTMF */
-	/* polling */
-	if (test_bit(VPM150M_ACTIVE, &vpm->control) && !whichframe && !(atomic_read(&wc->txints) % 100))
-		schedule_work(&vpm->work);
 
 #if 0
 	/* This may be needed sometime in the future to troubleshoot ADT related issues. */
@@ -1313,7 +1308,7 @@ static void setchanconfig_from_state(struct vpmadt032 *vpm, int channel, GpakCha
 
 	chanconfig->PcmInPortA = 3;
 	chanconfig->PcmInSlotA = (channel + 1) * 2;
-	chanconfig->PcmOutPortA = 2;
+	chanconfig->PcmOutPortA = SerialPortNull;
 	chanconfig->PcmOutSlotA = (channel + 1) * 2;
 	chanconfig->PcmInPortB = 2;
 	chanconfig->PcmInSlotB = (channel + 1) * 2;
@@ -1388,14 +1383,13 @@ static int t1_hardware_post_init(struct t1 *wc)
 		options.vpmnlptype = vpmnlptype;
 		options.vpmnlpthresh = vpmnlpthresh;
 		options.vpmnlpmaxsupp = vpmnlpmaxsupp;
+		options.channels = (wc->spantype == TYPE_T1) ? 24 : 32;
 
 		wc->vpmadt032 = vpmadt032_alloc(&options, wc->name);
 		if (!wc->vpmadt032)
 			return -ENOMEM;
 
-		wc->vpmadt032->context = wc;
 		wc->vpmadt032->setchanconfig_from_state = setchanconfig_from_state;
-		wc->vpmadt032->span = &wc->span;
 
 		res = vpmadt032_init(wc->vpmadt032, wc->vb);
 		if (res) {
@@ -1404,7 +1398,7 @@ static int t1_hardware_post_init(struct t1 *wc)
 			return -EIO;
 		}
 
-		config_vpmadt032(wc->vpmadt032);
+		config_vpmadt032(wc->vpmadt032, wc);
 
 		set_span_devicetype(wc);
 		module_printk("VPM present and operational (Firmware version %x)\n", wc->vpmadt032->version);
