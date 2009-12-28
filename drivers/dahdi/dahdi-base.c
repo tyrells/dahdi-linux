@@ -7935,7 +7935,7 @@ static void process_masterspan(void)
 			}
 		}
 #ifdef CONFIG_DAHDI_MMX
-		dahdi_kernel_fpu_end();
+		kernel_fpu_end();
 #endif
 	}
 	/* do all the pseudo/conferenced channel transmits (putbuf's) */
