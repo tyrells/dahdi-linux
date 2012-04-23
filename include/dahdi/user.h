@@ -344,6 +344,8 @@ enum {
 #define DAHDI_MAINT_NETWORKPAYLOADLOOP	13	/* Remote Loopback */
 #define DAHDI_RESET_COUNTERS		14	/* Clear the error counters */
 #define DAHDI_MAINT_ALARM_SIM		15	/* Simulate alarms */
+#define DAHDI_MAINT_BRI_ACTIVATE	16
+#define DAHDI_MAINT_BRI_DEACTIVATE	17
 
 /* Flag Value for IOMUX, read avail */
 #define DAHDI_IOMUX_READ	1

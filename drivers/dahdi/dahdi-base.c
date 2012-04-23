@@ -5428,6 +5428,15 @@ static int dahdi_ioctl_maint(unsigned long data)
 		}
 		spin_lock_irqsave(&s->lock, flags);
 		break;
+	case DAHDI_MAINT_BRI_ACTIVATE:
+	case DAHDI_MAINT_BRI_DEACTIVATE:
+		/* BRI state change requests always get passed through to the
+		 * underlying driver. */
+		s->maintstat = i;
+		spin_unlock_irqrestore(&s->lock, flags);
+		rv = s->ops->maint(s, maint.command);
+		put_span(s);
+		return rv;
 	default:
 		spin_unlock_irqrestore(&s->lock, flags);
 		module_printk(KERN_NOTICE,
