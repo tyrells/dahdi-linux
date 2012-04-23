@@ -2478,6 +2478,38 @@ static void b4xxp_hdlc_hard_xmit(struct dahdi_chan *chan)
 	}
 }
 
+static int b4xxp_maint(struct dahdi_span *span, int cmd)
+{
+	int res = 0;
+	struct b4xxp_span *bspan = container_of(span, struct b4xxp_span, span);
+
+	if (!bspan)
+		return -EINVAL;
+
+	switch (cmd) {
+	case DAHDI_MAINT_BRI_ACTIVATE:
+		if (bspan->te_mode) {
+			hfc_reset_st(bspan);
+			hfc_start_st(bspan);
+		} else {
+			hfc_force_st_state(bspan->parent, bspan->port, 2, 1);
+		}
+		break;
+	case DAHDI_MAINT_BRI_DEACTIVATE:
+		/* Only NT ports can request deactivation. */
+		if (!bspan->te_mode)
+			hfc_force_st_state(bspan->parent, bspan->port, 4, 1);
+		else
+			res = -EINVAL;
+		break;
+
+	default:
+		res = -EINVAL;
+		break;
+	}
+	return res;
+}
+
 /* internal functions, not specific to the hardware or DAHDI */
 
 static const struct dahdi_span_ops b4xxp_span_ops = {
@@ -2492,6 +2524,7 @@ static const struct dahdi_span_ops b4xxp_span_ops = {
 	.hdlc_hard_xmit = b4xxp_hdlc_hard_xmit,
 	.echocan_create = b4xxp_echocan_create,
 	.echocan_name = b4xxp_echocan_name,
+	.maint = b4xxp_maint,
 };
 
 /* initialize the span/chan structures. Doesn't touch hardware, although the callbacks might. */
