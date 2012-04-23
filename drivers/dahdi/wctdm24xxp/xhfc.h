@@ -48,5 +48,6 @@ void b400m_set_dahdi_span(struct b400m *b4, int spanno,
 			  struct wctdm_span *wspan);
 void b400m_module_init(void);
 void b400m_module_cleanup(void);
+int b400m_maint(struct dahdi_span *span, int cmd);
 
 #endif	/* _B4XX_H_ */

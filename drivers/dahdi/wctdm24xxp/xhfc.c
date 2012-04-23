@@ -604,6 +604,11 @@ struct b400m {
 static void hfc_start_st(struct b400m_span *s);
 static void hfc_stop_st(struct b400m_span *s);
 
+static inline struct b400m_span *bspan_from_dspan(struct dahdi_span *span)
+{
+	return container_of(span, struct wctdm_span, span)->bspan;
+}
+
 void b400m_set_dahdi_span(struct b400m *b4, int spanno,
 			  struct wctdm_span *wspan)
 {
@@ -1374,6 +1379,89 @@ static void hfc_force_st_state(struct b400m *b4, struct b400m_span *s,
 	hfc_handle_state(s);
 }
 
+/**
+ * bri_state_workitem - So state changes can be processsed in the workqueue
+ *
+ */
+struct bri_state_workitem {
+	struct work_struct work;
+	struct b400m_span *bspan;
+	bool activate;
+};
+
+static void hfc_reset_st(struct b400m_span *s);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+static void _b400m_set_state(void *data)
+{
+	struct bri_state_workitem *work = data;
+#else
+static void _b400m_set_state(struct work_struct *_work)
+{
+	struct bri_state_workitem *work =
+			container_of(_work, struct bri_state_workitem, work);
+#endif
+	struct b400m *b4 = work->bspan->parent;
+	if (work->activate) {
+		if (work->bspan->te_mode) {
+			hfc_reset_st(work->bspan);
+			hfc_start_st(work->bspan);
+		} else {
+			hfc_force_st_state(b4, work->bspan, 2, 1);
+		}
+	} else {
+		hfc_force_st_state(b4, work->bspan, 4, 1);
+	}
+	kfree(work);
+}
+
+int b400m_maint(struct dahdi_span *span, int cmd)
+{
+	int res = 0;
+	struct b400m_span *bspan = bspan_from_dspan(span);
+	struct b400m *b4;
+	struct bri_state_workitem *work;
+
+	if (!bspan)
+		return -EINVAL;
+
+	b4 = bspan->parent;
+
+	work = kzalloc(sizeof(*work), GFP_KERNEL);
+	if (!work)
+		return -ENOMEM;
+
+	work->bspan = bspan;
+#	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+	INIT_WORK(&work->work, _b400m_set_state, work);
+#	else
+	INIT_WORK(&work->work, _b400m_set_state);
+#	endif
+
+	switch (cmd) {
+	case DAHDI_MAINT_BRI_ACTIVATE:
+		work->activate = true;
+		queue_work(b4->xhfc_ws, &work->work);
+		break;
+	case DAHDI_MAINT_BRI_DEACTIVATE:
+		if (!bspan->te_mode) {
+			work->activate = false;
+			queue_work(b4->xhfc_ws, &work->work);
+		} else {
+			res = -EINVAL;
+		}
+		break;
+	default:
+		res = -EINVAL;
+		break;
+	}
+
+	if (res)
+		kfree(work);
+	return res;
+}
+
+
 /* figures out what to do when an S/T port's timer expires. */
 static void hfc_timer_expire(struct b400m_span *s, int t_no)
 {
@@ -2060,11 +2148,6 @@ static void xhfc_init_stage2(struct b400m *b4)
 	 * enable the global interrupt pin.  DAHDI still needs to start up the
 	 * spans, and we don't know exactly when.
 	 */
-}
-
-static inline struct b400m_span *bspan_from_dspan(struct dahdi_span *span)
-{
-	return container_of(span, struct wctdm_span, span)->bspan;
 }
 
 static int xhfc_startup(struct dahdi_span *span)

@@ -4446,6 +4446,7 @@ static const struct dahdi_span_ops wctdm24xxp_digital_span_ops = {
 	.chanconfig = b400m_chanconfig,
 	.dacs = wctdm_dacs,
 	.assigned = wctdm24xxp_assigned,
+	.maint = b400m_maint,
 #ifdef VPM_SUPPORT
 	.enable_hw_preechocan = wctdm_enable_hw_preechocan,
 	.disable_hw_preechocan = wctdm_disable_hw_preechocan,
