@@ -3848,7 +3848,11 @@ static int wctdm_ioctl(struct dahdi_chan *chan, unsigned int cmd, unsigned long 
 		}
 		break;
 	case WCTDM_SET_ECHOTUNE:
-		dev_info(&wc->vb.pdev->dev, "-- Setting echo registers: \n");
+		if (debug) {
+			dev_info(&wc->vb.pdev->dev,
+				 "-- Setting echo registers for channel %s: \n",
+				 chan->name);
+		}
 		if (copy_from_user(&echoregs, (__user void *) data, sizeof(echoregs)))
 			return -EFAULT;
 
@@ -3866,7 +3870,10 @@ static int wctdm_ioctl(struct dahdi_chan *chan, unsigned int cmd, unsigned long 
 			wctdm_setreg(wc, mod, 51, echoregs.coef7);
 			wctdm_setreg(wc, mod, 52, echoregs.coef8);
 
-			dev_info(&wc->vb.pdev->dev, "-- Set echo registers successfully\n");
+			if (debug) {
+				dev_info(&wc->vb.pdev->dev,
+					"-- Set echo registers successfully\n");
+			}
 
 			break;
 		} else {
