@@ -1415,7 +1415,7 @@ static void _b400m_set_state(struct work_struct *_work)
 	kfree(work);
 }
 
-int b400m_maint(struct dahdi_span *span, int cmd)
+int b400m_enable_transmit(struct dahdi_span *span, bool enable)
 {
 	int res = 0;
 	struct b400m_span *bspan = bspan_from_dspan(span);
@@ -1438,29 +1438,22 @@ int b400m_maint(struct dahdi_span *span, int cmd)
 	INIT_WORK(&work->work, _b400m_set_state);
 #	endif
 
-	switch (cmd) {
-	case DAHDI_MAINT_BRI_ACTIVATE:
+	if (enable) {
 		work->activate = true;
 		queue_work(b4->xhfc_ws, &work->work);
-		break;
-	case DAHDI_MAINT_BRI_DEACTIVATE:
+	} else {
 		if (!bspan->te_mode) {
 			work->activate = false;
 			queue_work(b4->xhfc_ws, &work->work);
 		} else {
 			res = -EINVAL;
 		}
-		break;
-	default:
-		res = -EINVAL;
-		break;
 	}
-
+	
 	if (res)
 		kfree(work);
 	return res;
 }
-
 
 /* figures out what to do when an S/T port's timer expires. */
 static void hfc_timer_expire(struct b400m_span *s, int t_no)

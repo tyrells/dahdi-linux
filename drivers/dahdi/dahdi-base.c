@@ -5430,11 +5430,13 @@ static int dahdi_ioctl_maint(unsigned long data)
 		break;
 	case DAHDI_MAINT_BRI_ACTIVATE:
 	case DAHDI_MAINT_BRI_DEACTIVATE:
-		/* BRI state change requests always get passed through to the
-		 * underlying driver. */
-		s->maintstat = i;
 		spin_unlock_irqrestore(&s->lock, flags);
-		rv = s->ops->maint(s, maint.command);
+		if (!s->ops->enable_transmit) {
+			rv = -ENOSYS;
+		} else {
+			rv = s->ops->enable_transmit(s,
+				(DAHDI_MAINT_BRI_ACTIVATE == maint.command));
+		}
 		put_span(s);
 		return rv;
 	default:
@@ -7162,6 +7164,7 @@ static void __dahdi_init_span(struct dahdi_span *span)
 	INIT_LIST_HEAD(&span->spans_node);
 	spin_lock_init(&span->lock);
 	clear_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags);
+	set_bit(DAHDI_FLAGBIT_TX_ENABLED, &span->flags);
 
 	if (!span->deflaw) {
 		module_printk(KERN_NOTICE, "Span %s didn't specify default "

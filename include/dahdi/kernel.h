@@ -706,6 +706,7 @@ enum {
 	DAHDI_FLAGBIT_REGISTERED= 0,
 	DAHDI_FLAGBIT_RUNNING	= 1,
 	DAHDI_FLAGBIT_RBS	= 12,	/*!< Span uses RBS signalling */
+	DAHDI_FLAGBIT_TX_ENABLED = 26,	/*!< SPAN transmitter is Enabled */
 
 	/* Channel flags */
 	DAHDI_FLAGBIT_DTMFDECODE= 2,	/*!< Channel supports native DTMF decode */
@@ -916,6 +917,11 @@ struct dahdi_span_ops {
 	/*! Called when the spantype / linemode is changed before the span is
 	 * assigned a number. */
 	int (*set_spantype)(struct dahdi_span *span, enum spantypes st);
+
+	/*! Called to activate / deactivate TX on a span. Only really valid for
+	 * digital spans. BRI spans can disable their clocks for layer1
+	 * deactivation and PRI spans can enter tristate modes. */
+	int (*enable_transmit)(struct dahdi_span *span, bool enable);
 };
 
 /**
