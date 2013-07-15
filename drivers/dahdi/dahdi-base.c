@@ -2755,7 +2755,7 @@ static void dahdi_rbs_sethook(struct dahdi_chan *chan, int txsig, int txstate,
 
 	/* if tone signalling */
 	if (chan->sig == DAHDI_SIG_SF) {
-		struct dahdi_sf_params *const sf = &chan->sf;
+		struct dahdi_sf_params *const sf = chan->sf;
 		chan->txhooksig = txsig;
 		if (sf->txtone) { /* if set to make tone for tx */
 			if ((txsig && !(sf->toneflags & DAHDI_REVERSE_TXTONE)) ||
@@ -5261,7 +5261,7 @@ static int dahdi_ioctl_sfconfig(unsigned long data)
 	if (chan->sig != DAHDI_SIG_SF)
 		return -EINVAL;
 
-	sf = &chan->sf;
+	sf = chan->sf;
 
 	spin_lock_irqsave(&chan->lock, flags);
 	sf->rxp1 = sfc.rxp1;
@@ -7957,9 +7957,9 @@ static inline void __dahdi_process_getaudio_chunk(struct dahdi_chan *ss, unsigne
 	/* save value from current */
 	memcpy(ms->getraw, txb, DAHDI_CHUNKSIZE);
 	/* if to make tx tone */
-	if (ms->sf.v1_1 || ms->sf.v2_1 || ms->sf.v3_1) {
-		for (x=0;x<DAHDI_CHUNKSIZE;x++) {
-			getlin[x] += dahdi_txtone_nextsample(&ms->sf);
+	if (ms->sf && (ms->sf->v1_1 || ms->sf->v2_1 || ms->sf->v3_1)) {
+		for (x = 0; x < DAHDI_CHUNKSIZE; x++) {
+			getlin[x] += dahdi_txtone_nextsample(ms->sf);
 			txb[x] = DAHDI_LIN2X(getlin[x], ms);
 		}
 	}
@@ -8827,17 +8827,17 @@ static inline void __dahdi_process_putaudio_chunk(struct dahdi_chan *ss, unsigne
 #endif
 
 	/* if doing rx tone decoding */
-	if (ms->sf.rxp1 && ms->sf.rxp2 && ms->sf.rxp3)
-	{
-		r = sf_detect(&ms->sf.rd, putlin, DAHDI_CHUNKSIZE, ms->sf.rxp1,
-			      ms->sf.rxp2, ms->sf.rxp3);
+	if (ms->sf && (ms->sf->rxp1 && ms->sf->rxp2 && ms->sf->rxp3)) {
+		struct dahdi_sf_params *const sf = ms->sf;
+		r = sf_detect(&sf->rd, putlin, DAHDI_CHUNKSIZE, sf->rxp1,
+			      sf->rxp2, sf->rxp3);
 		/* Convert back */
 		for(x=0;x<DAHDI_CHUNKSIZE;x++)
 			rxb[x] = DAHDI_LIN2X(putlin[x], ms);
 		if (r) { /* if something happened */
-			if (r != ms->sf.rd.lastdetect) {
-				if (((r == 2) && !(ms->sf.toneflags & DAHDI_REVERSE_RXTONE)) ||
-				    ((r == 1) && (ms->sf.toneflags & DAHDI_REVERSE_RXTONE)))
+			if (r != sf->rd.lastdetect) {
+				if (((r == 2) && !(sf->toneflags & DAHDI_REVERSE_RXTONE)) ||
+				    ((r == 1) && (sf->toneflags & DAHDI_REVERSE_RXTONE)))
 				{
 					__qevent(ms,DAHDI_EVENT_RINGOFFHOOK);
 				}
@@ -8845,7 +8845,7 @@ static inline void __dahdi_process_putaudio_chunk(struct dahdi_chan *ss, unsigne
 				{
 					__qevent(ms,DAHDI_EVENT_ONHOOK);
 				}
-				ms->sf.rd.lastdetect = r;
+				sf->rd.lastdetect = r;
 			}
 		}
 	}

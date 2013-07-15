@@ -459,7 +459,7 @@ struct dahdi_chan {
 	u16 channo;
 	u16 chanpos;
 	unsigned long flags;
-	struct dahdi_sf_params sf;
+	struct dahdi_sf_params *sf;
 
 	struct dahdi_chan *master;	/*!< Our Master channel (could be us) */
 	/*! \brief Next slave (if appropriate) */
