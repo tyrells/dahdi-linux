@@ -2912,21 +2912,21 @@ static int initialize_channel(struct dahdi_chan *chan)
 	chan->infcs = PPP_INITFCS;
 
 	/* Timings for RBS */
-	chan->prewinktime = DAHDI_DEFAULT_PREWINKTIME;
-	chan->preflashtime = DAHDI_DEFAULT_PREFLASHTIME;
-	chan->winktime = DAHDI_DEFAULT_WINKTIME;
-	chan->flashtime = DAHDI_DEFAULT_FLASHTIME;
+	chan->rbs.prewinktime = DAHDI_DEFAULT_PREWINKTIME;
+	chan->rbs.preflashtime = DAHDI_DEFAULT_PREFLASHTIME;
+	chan->rbs.winktime = DAHDI_DEFAULT_WINKTIME;
+	chan->rbs.flashtime = DAHDI_DEFAULT_FLASHTIME;
 
 	if (chan->sig & __DAHDI_SIG_FXO)
-		chan->starttime = DAHDI_DEFAULT_RINGTIME;
+		chan->rbs.starttime = DAHDI_DEFAULT_RINGTIME;
 	else
-		chan->starttime = DAHDI_DEFAULT_STARTTIME;
-	chan->rxwinktime = DAHDI_DEFAULT_RXWINKTIME;
-	chan->rxflashtime = DAHDI_DEFAULT_RXFLASHTIME;
-	chan->debouncetime = DAHDI_DEFAULT_DEBOUNCETIME;
-	chan->pulsemaketime = DAHDI_DEFAULT_PULSEMAKETIME;
-	chan->pulsebreaktime = DAHDI_DEFAULT_PULSEBREAKTIME;
-	chan->pulseaftertime = DAHDI_DEFAULT_PULSEAFTERTIME;
+		chan->rbs.starttime = DAHDI_DEFAULT_STARTTIME;
+	chan->rbs.rxwinktime = DAHDI_DEFAULT_RXWINKTIME;
+	chan->rbs.rxflashtime = DAHDI_DEFAULT_RXFLASHTIME;
+	chan->rbs.debouncetime = DAHDI_DEFAULT_DEBOUNCETIME;
+	chan->rbs.pulsemaketime = DAHDI_DEFAULT_PULSEMAKETIME;
+	chan->rbs.pulsebreaktime = DAHDI_DEFAULT_PULSEBREAKTIME;
+	chan->rbs.pulseaftertime = DAHDI_DEFAULT_PULSEAFTERTIME;
 
 	/* Initialize RBS timers */
 	chan->itimerset = chan->itimer = chan->otimer = 0;
@@ -2979,7 +2979,7 @@ static int initialize_channel(struct dahdi_chan *chan)
 	} else {
 		/* Do a default */
 		memset(chan->ringcadence, 0, sizeof(chan->ringcadence));
-		chan->ringcadence[0] = chan->starttime;
+		chan->ringcadence[0] = chan->rbs.starttime;
 		chan->ringcadence[1] = DAHDI_RINGOFFTIME;
 	}
 
@@ -3745,7 +3745,7 @@ static void __do_dtmf(struct dahdi_chan *chan)
 				if ((c >= '0') && (c <= '9') && (chan->txhooksig == DAHDI_TXSIG_OFFHOOK)) {
 					chan->pdialcount = (c == '0') ? 10 : c - '0';
 					dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_PULSEBREAK,
-						       chan->pulsebreaktime);
+						       chan->rbs.pulsebreaktime);
 					return;
 				}
 			} else {
@@ -4261,14 +4261,15 @@ static int dahdi_ioctl_getparams(struct file *file, unsigned long data)
 		param.rxhooksig = -1;
 		param.txhooksig = -1;
 	}
-	param.prewinktime = chan->prewinktime;
-	param.preflashtime = chan->preflashtime;
-	param.winktime = chan->winktime;
-	param.flashtime = chan->flashtime;
-	param.starttime = chan->starttime;
-	param.rxwinktime = chan->rxwinktime;
-	param.rxflashtime = chan->rxflashtime;
-	param.debouncetime = chan->debouncetime;
+
+	param.prewinktime = chan->rbs.prewinktime;
+	param.preflashtime = chan->rbs.preflashtime;
+	param.winktime = chan->rbs.winktime;
+	param.flashtime = chan->rbs.flashtime;
+	param.starttime = chan->rbs.starttime;
+	param.rxwinktime = chan->rbs.rxwinktime;
+	param.rxflashtime = chan->rbs.rxflashtime;
+	param.debouncetime = chan->rbs.debouncetime;
 	param.channo = chan->channo;
 	param.chan_alarms = chan->chan_alarms;
 
@@ -4277,9 +4278,9 @@ static int dahdi_ioctl_getparams(struct file *file, unsigned long data)
 	if (return_master)
 		param.channo |= chan->master->channo << 16;
 
-	param.pulsemaketime = chan->pulsemaketime;
-	param.pulsebreaktime = chan->pulsebreaktime;
-	param.pulseaftertime = chan->pulseaftertime;
+	param.pulsemaketime = chan->rbs.pulsemaketime;
+	param.pulsebreaktime = chan->rbs.pulsebreaktime;
+	param.pulseaftertime = chan->rbs.pulseaftertime;
 	param.spanno = (chan->span) ? chan->span->spanno : 0;
 	strlcpy(param.name, chan->name, sizeof(param.name));
 	param.chanpos = chan->chanpos;
@@ -4321,20 +4322,20 @@ static int dahdi_ioctl_setparams(struct file *file, unsigned long data)
 	/* point to relevant structure */
 	/* NOTE: sigtype is *not* included in this */
 	  /* get timing paramters */
-	chan->prewinktime = param.prewinktime;
-	chan->preflashtime = param.preflashtime;
-	chan->winktime = param.winktime;
-	chan->flashtime = param.flashtime;
-	chan->starttime = param.starttime;
+	chan->rbs.prewinktime = param.prewinktime;
+	chan->rbs.preflashtime = param.preflashtime;
+	chan->rbs.winktime = param.winktime;
+	chan->rbs.flashtime = param.flashtime;
+	chan->rbs.starttime = param.starttime;
 	/* Update ringtime if not using a tone zone */
 	if (!chan->curzone)
-		chan->ringcadence[0] = chan->starttime;
-	chan->rxwinktime = param.rxwinktime;
-	chan->rxflashtime = param.rxflashtime;
-	chan->debouncetime = param.debouncetime;
-	chan->pulsemaketime = param.pulsemaketime;
-	chan->pulsebreaktime = param.pulsebreaktime;
-	chan->pulseaftertime = param.pulseaftertime;
+		chan->ringcadence[0] = chan->rbs.starttime;
+	chan->rbs.rxwinktime = param.rxwinktime;
+	chan->rbs.rxflashtime = param.rxflashtime;
+	chan->rbs.debouncetime = param.debouncetime;
+	chan->rbs.pulsemaketime = param.pulsemaketime;
+	chan->rbs.pulsebreaktime = param.pulsebreaktime;
+	chan->rbs.pulseaftertime = param.pulseaftertime;
 	return 0;
 }
 
@@ -6234,7 +6235,7 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 				}
 			} else {
 				memset(chan->ringcadence, 0, sizeof(chan->ringcadence));
-				chan->ringcadence[0] = chan->starttime;
+				chan->ringcadence[0] = chan->rbs.starttime;
 				chan->ringcadence[1] = DAHDI_RINGOFFTIME;
 			}
 		}
@@ -6754,7 +6755,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 					spin_unlock_irqrestore(&chan->lock, flags);
 					return -EBUSY;
 				}
-				dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_DEBOUNCE, chan->debouncetime);
+				dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_DEBOUNCE, chan->rbs.debouncetime);
 				spin_unlock_irqrestore(&chan->lock, flags);
 				break;
 			case DAHDI_RING:
@@ -6775,7 +6776,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 					ret = chan->ringcadence[0];
 					dahdi_rbs_sethook(chan, DAHDI_TXSIG_START, DAHDI_TXSTATE_RINGON, ret);
 				} else
-					dahdi_rbs_sethook(chan, DAHDI_TXSIG_START, DAHDI_TXSTATE_START, chan->starttime);
+					dahdi_rbs_sethook(chan, DAHDI_TXSIG_START, DAHDI_TXSTATE_START, chan->rbs.starttime);
 				spin_unlock_irqrestore(&chan->lock, flags);
 				if (file->f_flags & O_NONBLOCK)
 					return -EINPROGRESS;
@@ -6786,7 +6787,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 					spin_unlock_irqrestore(&chan->lock, flags);
 					return -EBUSY;
 				}
-				dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_PREWINK, chan->prewinktime);
+				dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_PREWINK, chan->rbs.prewinktime);
 				spin_unlock_irqrestore(&chan->lock, flags);
 				if (file->f_flags & O_NONBLOCK)
 					return -EINPROGRESS;
@@ -6803,7 +6804,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 					spin_unlock_irqrestore(&chan->lock, flags);
 					return -EBUSY;
 				}
-				dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_PREFLASH, chan->preflashtime);
+				dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_PREFLASH, chan->rbs.preflashtime);
 				spin_unlock_irqrestore(&chan->lock, flags);
 				if (file->f_flags & O_NONBLOCK)
 					return -EINPROGRESS;
@@ -8242,7 +8243,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 
 	case DAHDI_TXSTATE_PREWINK:
 		/* Actually wink */
-		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_WINK, chan->winktime);
+		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_WINK, chan->rbs.winktime);
 		break;
 
 	case DAHDI_TXSTATE_WINK:
@@ -8255,7 +8256,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 
 	case DAHDI_TXSTATE_PREFLASH:
 		/* Actually flash */
-		dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_FLASH, chan->flashtime);
+		dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_FLASH, chan->rbs.flashtime);
 		break;
 
 	case DAHDI_TXSTATE_FLASH:
@@ -8268,8 +8269,8 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 	case DAHDI_TXSTATE_DEBOUNCE:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_OFFHOOK, 0);
 		/* See if we've gone back on hook */
-		if ((chan->rxhooksig == DAHDI_RXSIG_ONHOOK) && (chan->rxflashtime > 2))
-			chan->itimerset = chan->itimer = chan->rxflashtime * DAHDI_CHUNKSIZE;
+		if ((chan->rxhooksig == DAHDI_RXSIG_ONHOOK) && (chan->rbs.rxflashtime > 2))
+			chan->itimerset = chan->itimer = chan->rbs.rxflashtime * DAHDI_CHUNKSIZE;
 		wake_up_interruptible(&chan->waitq);
 		break;
 
@@ -8297,7 +8298,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 
 	case DAHDI_TXSTATE_PULSEBREAK:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_PULSEMAKE,
-			chan->pulsemaketime);
+			chan->rbs.pulsemaketime);
 		wake_up_interruptible(&chan->waitq);
 		break;
 
@@ -8307,11 +8308,11 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		if (chan->pdialcount)
 		{
 			dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK,
-				DAHDI_TXSTATE_PULSEBREAK, chan->pulsebreaktime);
+				DAHDI_TXSTATE_PULSEBREAK, chan->rbs.pulsebreaktime);
 			break;
 		}
 		chan->txstate = DAHDI_TXSTATE_PULSEAFTER;
-		chan->otimer = chan->pulseaftertime * DAHDI_CHUNKSIZE;
+		chan->otimer = chan->rbs.pulseaftertime * DAHDI_CHUNKSIZE;
 		wake_up_interruptible(&chan->waitq);
 		break;
 
@@ -8376,7 +8377,7 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 			}
 #endif
 			/* set wink timer */
-			chan->itimerset = chan->itimer = chan->rxwinktime * DAHDI_CHUNKSIZE;
+			chan->itimerset = chan->itimer = chan->rbs.rxwinktime * DAHDI_CHUNKSIZE;
 			break;
 		    case DAHDI_RXSIG_ONHOOK: /* went on hook */
 			/* This interface is now going on hook.
@@ -8486,7 +8487,7 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 			if ((chan->txstate != DAHDI_TXSTATE_DEBOUNCE) &&
 			    (chan->txstate != DAHDI_TXSTATE_KEWL) &&
 			    (chan->txstate != DAHDI_TXSTATE_AFTERKEWL)) {
-				chan->itimerset = chan->itimer = chan->rxflashtime * DAHDI_CHUNKSIZE;
+				chan->itimerset = chan->itimer = chan->rbs.rxflashtime * DAHDI_CHUNKSIZE;
 			}
 			if (chan->txstate == DAHDI_TXSTATE_KEWL)
 				chan->kewlonhook = 1;

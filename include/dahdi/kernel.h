@@ -408,6 +408,20 @@ struct dahdi_echocan_state {
 	} events;
 };
 
+struct dahdi_rbs_config {
+	u16 prewinktime;  /*!< pre-wink time (ms) */
+	u16 preflashtime;	/*!< pre-flash time (ms) */
+	u16 winktime;  /*!< wink time (ms) */
+	u16 flashtime;  /*!< flash time (ms) */
+	u16 starttime;  /*!< start time (ms) */
+	u16 rxwinktime;  /*!< rx wink time (ms) */
+	u16 rxflashtime; /*!< rx flash time (ms) */
+	u16 debouncetime;  /*!< FXS GS sig debounce time (ms) */
+	u16 pulsebreaktime; /*!< pulse line open time (ms) */
+	u16 pulsemaketime;  /*!< pulse line closed time (ms) */
+	u16 pulseaftertime; /*!< pulse time between digits (ms) */
+};
+
 struct dahdi_chan {
 #ifdef CONFIG_DAHDI_NET
 	/*! \note Must be first */
@@ -561,18 +575,7 @@ struct dahdi_chan {
 	/*! The state data of the echo canceler instance in use */
 	struct dahdi_echocan_state *ec_state;
 
-	/* RBS timings  */
-	int		prewinktime;  /*!< pre-wink time (ms) */
-	int		preflashtime;	/*!< pre-flash time (ms) */
-	int		winktime;  /*!< wink time (ms) */
-	int		flashtime;  /*!< flash time (ms) */
-	int		starttime;  /*!< start time (ms) */
-	int		rxwinktime;  /*!< rx wink time (ms) */
-	int		rxflashtime; /*!< rx flash time (ms) */
-	int		debouncetime;  /*!< FXS GS sig debounce time (ms) */
-	int		pulsebreaktime; /*!< pulse line open time (ms) */
-	int		pulsemaketime;  /*!< pulse line closed time (ms) */
-	int		pulseaftertime; /*!< pulse time between digits (ms) */
+	struct dahdi_rbs_config rbs;
 
 	/*! RING debounce timer */
 	int	ringdebtimer;
