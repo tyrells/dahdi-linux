@@ -422,6 +422,20 @@ struct dahdi_rbs_config {
 	u16 pulseaftertime; /*!< pulse time between digits (ms) */
 };
 
+struct dahdi_sf_params {
+	long rxp1;
+	long rxp2;
+	long rxp3;
+	int txtone;
+	int tx_v2;
+	int tx_v3;
+	int v1_1;
+	int v2_1;
+	int v3_1;
+	int toneflags;
+	struct sf_detect_state rd;
+};
+
 struct dahdi_chan {
 #ifdef CONFIG_DAHDI_NET
 	/*! \note Must be first */
@@ -442,20 +456,10 @@ struct dahdi_chan {
 	char name[40];
 	/* Specified by DAHDI */
 	/*! \brief DAHDI channel number */
-	int channo;
-	int chanpos;
+	u16 channo;
+	u16 chanpos;
 	unsigned long flags;
-	long rxp1;
-	long rxp2;
-	long rxp3;
-	int txtone;
-	int tx_v2;
-	int tx_v3;
-	int v1_1;
-	int v2_1;
-	int v3_1;
-	int toneflags;
-	struct sf_detect_state rd;
+	struct dahdi_sf_params sf;
 
 	struct dahdi_chan *master;	/*!< Our Master channel (could be us) */
 	/*! \brief Next slave (if appropriate) */
@@ -1344,14 +1348,13 @@ static inline short dahdi_tone_nextsample(struct dahdi_tone_state *ts, struct da
 
 }
 
-static inline short dahdi_txtone_nextsample(struct dahdi_chan *ss)
+static inline short dahdi_txtone_nextsample(struct dahdi_sf_params *sf)
 {
 	/* follow the curves, return the sum */
-
-	ss->v1_1 = ss->v2_1;
-	ss->v2_1 = ss->v3_1;
-	ss->v3_1 = (ss->txtone * ss->v2_1 >> 15) - ss->v1_1;
-	return ss->v3_1;
+	sf->v1_1 = sf->v2_1;
+	sf->v2_1 = sf->v3_1;
+	sf->v3_1 = (sf->txtone * sf->v2_1 >> 15) - sf->v1_1;
+	return sf->v3_1;
 }
 
 /* These are the right functions to use.  */

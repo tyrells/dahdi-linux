@@ -2651,17 +2651,17 @@ static int dahdi_chan_release(struct file *file)
 	return 0;
 }
 
-static void set_txtone(struct dahdi_chan *ss, int fac, int init_v2, int init_v3)
+static void set_txtone(struct dahdi_sf_params *sf, int fac, int init_v2, int init_v3)
 {
 	if (fac == 0) {
-		ss->v2_1 = 0;
-		ss->v3_1 = 0;
+		sf->v2_1 = 0;
+		sf->v3_1 = 0;
 		return;
 	}
-	ss->txtone = fac;
-	ss->v1_1 = 0;
-	ss->v2_1 = init_v2;
-	ss->v3_1 = init_v3;
+	sf->txtone = fac;
+	sf->v1_1 = 0;
+	sf->v2_1 = init_v2;
+	sf->v3_1 = init_v3;
 	return;
 }
 
@@ -2755,13 +2755,14 @@ static void dahdi_rbs_sethook(struct dahdi_chan *chan, int txsig, int txstate,
 
 	/* if tone signalling */
 	if (chan->sig == DAHDI_SIG_SF) {
+		struct dahdi_sf_params *const sf = &chan->sf;
 		chan->txhooksig = txsig;
-		if (chan->txtone) { /* if set to make tone for tx */
-			if ((txsig && !(chan->toneflags & DAHDI_REVERSE_TXTONE)) ||
-			 ((!txsig) && (chan->toneflags & DAHDI_REVERSE_TXTONE))) {
-				set_txtone(chan,chan->txtone,chan->tx_v2,chan->tx_v3);
+		if (sf->txtone) { /* if set to make tone for tx */
+			if ((txsig && !(sf->toneflags & DAHDI_REVERSE_TXTONE)) ||
+			 ((!txsig) && (sf->toneflags & DAHDI_REVERSE_TXTONE))) {
+				set_txtone(sf,sf->txtone,sf->tx_v2,sf->tx_v3);
 			} else {
-				set_txtone(chan,0,0,0);
+				set_txtone(sf,0,0,0);
 			}
 		}
 		chan->otimer = timeout * DAHDI_CHUNKSIZE;			/* Otimer is timer in samples */
@@ -5248,33 +5249,36 @@ static int dahdi_ioctl_sfconfig(unsigned long data)
 	int res = 0;
 	unsigned long flags;
 	struct dahdi_chan *chan;
-	struct dahdi_sfconfig sf;
+	struct dahdi_sfconfig sfc;
+	struct dahdi_sf_params *sf;
 
-	if (copy_from_user(&sf, (void __user *)data, sizeof(sf)))
+	if (copy_from_user(&sfc, (void __user *)data, sizeof(sfc)))
 		return -EFAULT;
-	chan = chan_from_num(sf.chan);
+	chan = chan_from_num(sfc.chan);
 	if (!chan)
 		return -EINVAL;
 
 	if (chan->sig != DAHDI_SIG_SF)
 		return -EINVAL;
 
+	sf = &chan->sf;
+
 	spin_lock_irqsave(&chan->lock, flags);
-	chan->rxp1 = sf.rxp1;
-	chan->rxp2 = sf.rxp2;
-	chan->rxp3 = sf.rxp3;
-	chan->txtone = sf.txtone;
-	chan->tx_v2 = sf.tx_v2;
-	chan->tx_v3 = sf.tx_v3;
-	chan->toneflags = sf.toneflag;
-	if (sf.txtone) { /* if set to make tone for tx */
+	sf->rxp1 = sfc.rxp1;
+	sf->rxp2 = sfc.rxp2;
+	sf->rxp3 = sfc.rxp3;
+	sf->txtone = sfc.txtone;
+	sf->tx_v2 = sfc.tx_v2;
+	sf->tx_v3 = sfc.tx_v3;
+	sf->toneflags = sfc.toneflag;
+	if (sfc.txtone) { /* if set to make tone for tx */
 		if ((chan->txhooksig &&
-		     !(sf.toneflag & DAHDI_REVERSE_TXTONE)) ||
+		     !(sfc.toneflag & DAHDI_REVERSE_TXTONE)) ||
 		     ((!chan->txhooksig) &&
-		       (sf.toneflag & DAHDI_REVERSE_TXTONE))) {
-			set_txtone(chan, sf.txtone, sf.tx_v2, sf.tx_v3);
+		       (sfc.toneflag & DAHDI_REVERSE_TXTONE))) {
+			set_txtone(sf, sfc.txtone, sfc.tx_v2, sfc.tx_v3);
 		} else {
-			set_txtone(chan, 0, 0, 0);
+			set_txtone(sf, 0, 0, 0);
 		}
 	}
 	spin_unlock_irqrestore(&chan->lock, flags);
@@ -7953,11 +7957,9 @@ static inline void __dahdi_process_getaudio_chunk(struct dahdi_chan *ss, unsigne
 	/* save value from current */
 	memcpy(ms->getraw, txb, DAHDI_CHUNKSIZE);
 	/* if to make tx tone */
-	if (ms->v1_1 || ms->v2_1 || ms->v3_1)
-	{
-		for (x=0;x<DAHDI_CHUNKSIZE;x++)
-		{
-			getlin[x] += dahdi_txtone_nextsample(ms);
+	if (ms->sf.v1_1 || ms->sf.v2_1 || ms->sf.v3_1) {
+		for (x=0;x<DAHDI_CHUNKSIZE;x++) {
+			getlin[x] += dahdi_txtone_nextsample(&ms->sf);
 			txb[x] = DAHDI_LIN2X(getlin[x], ms);
 		}
 	}
@@ -8825,19 +8827,17 @@ static inline void __dahdi_process_putaudio_chunk(struct dahdi_chan *ss, unsigne
 #endif
 
 	/* if doing rx tone decoding */
-	if (ms->rxp1 && ms->rxp2 && ms->rxp3)
+	if (ms->sf.rxp1 && ms->sf.rxp2 && ms->sf.rxp3)
 	{
-		r = sf_detect(&ms->rd,putlin,DAHDI_CHUNKSIZE,ms->rxp1,
-			ms->rxp2,ms->rxp3);
+		r = sf_detect(&ms->sf.rd, putlin, DAHDI_CHUNKSIZE, ms->sf.rxp1,
+			      ms->sf.rxp2, ms->sf.rxp3);
 		/* Convert back */
 		for(x=0;x<DAHDI_CHUNKSIZE;x++)
 			rxb[x] = DAHDI_LIN2X(putlin[x], ms);
-		if (r) /* if something happened */
-		{
-			if (r != ms->rd.lastdetect)
-			{
-				if (((r == 2) && !(ms->toneflags & DAHDI_REVERSE_RXTONE)) ||
-				    ((r == 1) && (ms->toneflags & DAHDI_REVERSE_RXTONE)))
+		if (r) { /* if something happened */
+			if (r != ms->sf.rd.lastdetect) {
+				if (((r == 2) && !(ms->sf.toneflags & DAHDI_REVERSE_RXTONE)) ||
+				    ((r == 1) && (ms->sf.toneflags & DAHDI_REVERSE_RXTONE)))
 				{
 					__qevent(ms,DAHDI_EVENT_RINGOFFHOOK);
 				}
@@ -8845,7 +8845,7 @@ static inline void __dahdi_process_putaudio_chunk(struct dahdi_chan *ss, unsigne
 				{
 					__qevent(ms,DAHDI_EVENT_ONHOOK);
 				}
-				ms->rd.lastdetect = r;
+				ms->sf.rd.lastdetect = r;
 			}
 		}
 	}
