@@ -517,6 +517,21 @@ static int dahdi_dynamic_rbsbits(struct dahdi_chan *chan, int bits)
 	return 0;
 }
 
+static int dahdi_dynamic_driver_ioctl(struct dahdi_chan *chan,
+				      unsigned int cmd, unsigned long data)
+{
+	int res = -ENOSYS;
+	struct dahdi_dynamic *d = dynamic_from_span(chan->span);
+	if (!try_module_get(d->driver->owner))
+		return -ENODEV;
+	dynamic_get(d);
+	if (d->driver->ioctl)
+		res = d->driver->ioctl(d, chan, cmd, data);
+	dynamic_put(d);
+	module_put(d->driver->owner);
+	return res;
+}
+
 static int dahdi_dynamic_open(struct dahdi_chan *chan)
 {
 	struct dahdi_dynamic *d = dynamic_from_span(chan->span);
@@ -561,6 +576,7 @@ static void dahdi_dynamic_sync_tick(struct dahdi_span *span, int is_master)
 static const struct dahdi_span_ops dynamic_ops = {
 	.owner = THIS_MODULE,
 	.rbsbits = dahdi_dynamic_rbsbits,
+	.ioctl = dahdi_dynamic_driver_ioctl,
 	.open = dahdi_dynamic_open,
 	.close = dahdi_dynamic_close,
 	.chanconfig = dahdi_dynamic_chanconfig,
