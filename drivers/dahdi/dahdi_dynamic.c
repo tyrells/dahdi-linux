@@ -341,7 +341,7 @@ void dahdi_dynamic_receive(struct dahdi_span *span, unsigned char *msg, int msgl
 			sig = (bits >> ((x % 4) << 2)) & 0xff;
 			
 			/* Update signalling if appropriate */
-			if ((sig != span->chans[x]->rxsig) && !(dtd->rxcnt % 32))
+			if (sig != span->chans[x]->rxsig)
 				dahdi_rbsbits(span->chans[x], sig);
 				
 		}
