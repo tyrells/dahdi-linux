@@ -1125,9 +1125,6 @@ struct dahdi_dynamic_driver {
 	/*! Flush any pending messages */
 	int (*flush)(void);
 
-	int (*ioctl)(struct dahdi_dynamic *d, struct dahdi_chan *chan,
-		     unsigned int cmd, unsigned long data);
-
 	struct list_head list;
 	struct module *owner;
 

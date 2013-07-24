@@ -70,7 +70,6 @@ struct dahdi_dynamic_local {
 	struct dahdi_dynamic_local *peer;
 	struct dahdi_span *span;
 	struct list_head node;
-	unsigned long polarity:1;
 };
 
 static DEFINE_SPINLOCK(local_lock);
@@ -244,47 +243,6 @@ INVALID_ADDRESS:
 	return -EINVAL;
 }
 
-static struct dahdi_chan *
-dahdi_dynamic_get_peer(struct dahdi_dynamic_local *loc, struct dahdi_chan *chan)
-{
-	if (!loc->peer)
-		return NULL;
-	if (!loc->peer->span)
-		return NULL;
-	if (loc->peer->span->channels < chan->chanpos)
-		return NULL;
-	return loc->peer->span->chans[chan->chanpos-1];
-}
-
-static int
-dahdi_dynamic_loc_ioctl(struct dahdi_dynamic *d, struct dahdi_chan *chan,
-			unsigned int cmd, unsigned long data)
-{
-	struct dahdi_dynamic_local *loc = d->pvt;
-	struct dahdi_chan *peer_chan = dahdi_dynamic_get_peer(loc, chan);
-	int x;
-
-	if (get_user(x, (__user int *) data))
-		return -EFAULT;
-	if (!peer_chan)
-		return -EINVAL;
-
-	printk(KERN_INFO "%s: handling_ioctl\n", chan->name);
-	switch (cmd) {
-	case DAHDI_SETPOLARITY:
-		if (x != (int)chan->pvt) {
-			printk(KERN_INFO "%s: Setting polarity on peer %s\n", chan->name, peer_chan->name);
-			dahdi_qevent_lock(peer_chan, DAHDI_EVENT_POLARITY);
-			chan->pvt = (void*)x;
-		}
-		break;
-	default:
-		printk(KERN_INFO "%s: Unknown command %08x\n", chan->name, cmd);
-		break;
-	}
-	return 0;
-}
-
 static struct dahdi_dynamic_driver dahdi_dynamic_local = {
 	.owner = THIS_MODULE,
 	.name = "loc",
@@ -292,7 +250,6 @@ static struct dahdi_dynamic_driver dahdi_dynamic_local = {
 	.create = dahdi_dynamic_local_create,
 	.destroy = dahdi_dynamic_local_destroy,
 	.transmit = dahdi_dynamic_local_transmit,
-	.ioctl = dahdi_dynamic_loc_ioctl,
 };
 
 static int __init dahdi_dynamic_local_init(void)
