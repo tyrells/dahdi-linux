@@ -75,6 +75,7 @@ else:
         call("git clone git://git.asterisk.org/dahdi/linux dahdi-linux")
         os.chdir("/usr/src/dahdi-linux")
     call("make install")
+    call("make config")
 
     os.chdir("/usr/src")
     call("git clone git://git.asterisk.org/dahdi/tools dahdi-tools")
@@ -105,3 +106,7 @@ fxsks=51-52
 loadzone        = us
 defaultzone     = us
 """)
+
+print "*******************************************************************************"
+print "Please run 'vagrant halt' followed by 'vagrant up' before using virtual machine"
+print "*******************************************************************************"
