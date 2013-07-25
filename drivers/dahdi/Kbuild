@@ -113,15 +113,15 @@ endif
 # VPMADT032 Loader
 ###############################################################################
 
-dahdi_vpmadt032_loader-objs := vpmadt032_loader/dahdi_vpmadt032_loader.o 
-
-ifneq ($(DAHDI_ARCH),)
-  ifneq ($(wildcard $(src)/vpmadt032_loader/vpmadt032_$(DAHDI_ARCH).o_shipped),)
-    VPMADT032_LOADER_PRESENT=yes
-    dahdi_vpmadt032_loader-objs += vpmadt032_loader/vpmadt032_$(DAHDI_ARCH).o
-    obj-$(DAHDI_BUILD_ALL)$(CONFIG_DAHDI_VPMADT032_LOADER)	+= dahdi_vpmadt032_loader.o
-  endif
-endif
+#dahdi_vpmadt032_loader-objs := vpmadt032_loader/dahdi_vpmadt032_loader.o 
+#
+#ifneq ($(DAHDI_ARCH),)
+#  ifneq ($(wildcard $(src)/vpmadt032_loader/vpmadt032_$(DAHDI_ARCH).o_shipped),)
+#    VPMADT032_LOADER_PRESENT=yes
+#    dahdi_vpmadt032_loader-objs += vpmadt032_loader/vpmadt032_$(DAHDI_ARCH).o
+#    obj-$(DAHDI_BUILD_ALL)$(CONFIG_DAHDI_VPMADT032_LOADER)	+= dahdi_vpmadt032_loader.o
+#  endif
+#endif
 
 ###############################################################################
 # HPEC Support 

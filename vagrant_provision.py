@@ -64,7 +64,7 @@ if os.path.exists("/usr/src/dahdi-tools"):
     source_version = call_output("git log -1 --oneline | cut -f 1 -d \ ")
     installed_version = dahdi_tools_installed_version()
     if installed_version != source_version:
-        call("./configure; make; make install")
+        call("./configure; make; make install; make config")
 else:
     # Dahdi linux needs to be installed in order to build dahdi_tools
     if os.path.exists("/usr/src/dahdi-linux"):
@@ -75,12 +75,11 @@ else:
         call("git clone git://git.asterisk.org/dahdi/linux dahdi-linux")
         os.chdir("/usr/src/dahdi-linux")
     call("make install")
-    call("make config")
 
     os.chdir("/usr/src")
     call("git clone git://git.asterisk.org/dahdi/tools dahdi-tools")
     os.chdir("/usr/src/dahdi-tools")
-    call("./configure; make; make install")
+    call("./configure; make; make install; make config")
 
 if os.path.exists("/usr/src/mytools"):
     os.chdir("/usr/src/mytools")
@@ -108,5 +107,6 @@ defaultzone     = us
 """)
 
 print "*******************************************************************************"
-print "Please run 'vagrant halt' followed by 'vagrant up' before using virtual machine"
+print "Please run 'vagrant halt' followed by 'vagrant up --no-provision' before       "
+print "using virtual machine."
 print "*******************************************************************************"
