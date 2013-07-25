@@ -109,7 +109,8 @@ install-xpp-firm:
 
 install-firmware:
 ifeq ($(HOTPLUG_FIRMWARE),yes)
-	$(MAKE) -C drivers/dahdi/firmware hotplug-install DESTDIR=$(DESTDIR) HOTPLUG_FIRMWARE=$(HOTPLUG_FIRMWARE)
+	#$(MAKE) -C drivers/dahdi/firmware hotplug-install DESTDIR=$(DESTDIR) HOTPLUG_FIRMWARE=$(HOTPLUG_FIRMWARE)
+	@echo "skipping firmware install"
 endif
 
 uninstall-firmware:
@@ -123,7 +124,8 @@ ifeq (no,$(HAS_KSRC))
 	@echo "You do not appear to have the sources for the $(KVERS) kernel installed."
 	@exit 1
 endif
-	$(MAKE) -C $(KSRC) M='$(PWD)/drivers/dahdi/oct612x'
+	#$(MAKE) -C $(KSRC) M='$(PWD)/drivers/dahdi/oct612x'
+	@echo "Skipping oct612x build"
 
 install-include:
 	for hdr in $(INST_HEADERS); do \
