@@ -51,6 +51,7 @@ deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise-backports m
 deb http://10.24.17.167:3142/journey.digium.internal/ubuntu precise-security main restricted
 deb http://10.24.17.167:3142/journey.digium.internal/ubuntu precise-security universe
 """)
+
 apt_update()
 call("apt-get install -y build-essential tig git vim python-libpcap")
 call("apt-get install -y gcc libncurses-dev libnewt-dev libtool make linux-headers-$(uname -r)")
@@ -79,6 +80,14 @@ else:
     call("git clone git://git.asterisk.org/dahdi/tools dahdi-tools")
     os.chdir("/usr/src/dahdi-tools")
     call("./configure; make; make install")
+
+if os.path.exists("/usr/src/mytools"):
+    os.chdir("/usr/src/mytools")
+    call("git fetch -q; git reset -q --hard origin/master")
+else:
+    os.chdir("/usr/src")
+    call("git clone git://git.digium.internal/team/sruffell/mytools")
+
 
 call("mkdir -p /etc/dahdi/")
 open("/etc/dahdi/system.conf", "w").write("""dynamic=loc,1:0,24,0
