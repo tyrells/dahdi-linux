@@ -14,7 +14,67 @@ def call(command):
 def call_output(command):
     return subprocess.Popen(command, shell=True, stdout=subprocess.PIPE).communicate()[0].strip()
 
+def setup_dahdi_linux():
+    if os.path.exists("/usr/src/dahdi-tools"):
+        os.chdir("/usr/src/dahdi-tools")
+        call("git fetch -q; git reset -q --hard origin/master")
+        source_version = call_output("git log -1 --oneline | cut -f 1 -d \ ")
+        installed_version = dahdi_tools_installed_version()
+        if installed_version != source_version:
+            call("./configure; make; make install; make config")
+    else:
+        # Dahdi linux needs to be installed in order to build dahdi_tools
+        if os.path.exists("/usr/src/dahdi-linux"):
+            os.chdir("/usr/src/dahdi-linux")
+            call("git fetch -q; git reset -q --hard origin/master")
+        else:
+            os.chdir("/usr/src")
+            call("git clone git://git.asterisk.org/dahdi/linux dahdi-linux")
+            os.chdir("/usr/src/dahdi-linux")
+        call("make install")
+
+        os.chdir("/usr/src")
+        call("git clone git://git.asterisk.org/dahdi/tools dahdi-tools")
+        os.chdir("/usr/src/dahdi-tools")
+        call("./configure; make; make install; make config")
+
+def setup_my_tools():
+    if os.path.exists("/usr/src/mytools"):
+        os.chdir("/usr/src/mytools")
+        call("git fetch -q; git reset -q --hard origin/master")
+    else:
+        os.chdir("/usr/src")
+        call("git clone git://git.digium.internal/team/sruffell/mytools")
+
+def setup_libpri():
+    if os.path.exists("/usr/src/libpri-1.4.14"):
+        return
+    os.chdir("/usr/src")
+    call("svn co http://svn.asterisk.org/svn/libpri/tags/1.4.14 libpri-1.4.14")
+    os.chdir("/usr/src/libpri-1.4.14")
+    call("make; make install")
+    
+def setup_asterisk():
+    if os.path.exists("/usr/src/asterisk-11.5.0"):
+        return
+    os.chdir("/usr/src")
+    call("svn co http://svn.asterisk.org/svn/asterisk/tags/11.5.0 asterisk-11.5.0")
+    os.chdir("/usr/src/asterisk-11.5.0")
+    if call("/usr/src/asterisk-11.5.0/contrib/scripts/install_prereq install"):
+        raise Exception("Failed to install asterisk prereqs")
+    call("./configure; make; make install")
+
 def apt_update():
+    # Let's use the digium internal repository.
+    open("/etc/apt/sources.list", "w").write("""deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise main restricted
+    deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise-updates main restricted
+    deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise universe
+    deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise-updates universe
+    deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise-backports main restricted
+    deb http://10.24.17.167:3142/journey.digium.internal/ubuntu precise-security main restricted
+    deb http://10.24.17.167:3142/journey.digium.internal/ubuntu precise-security universe
+    """)
+
     # This ensures that we do not run apt-get update any more frequently than
     # once every 24 hours
     def _apt_update():
@@ -42,51 +102,17 @@ def dahdi_tools_installed_version():
 
     raise Exception("Huh? No DAHDI Tools Version printed?")
 
-# Let's use the digium internal repository.
-open("/etc/apt/sources.list", "w").write("""deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise main restricted
-deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise-updates main restricted
-deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise universe
-deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise-updates universe
-deb http://10.24.17.167:3142/journey.digium.internal/ubuntu/ precise-backports main restricted
-deb http://10.24.17.167:3142/journey.digium.internal/ubuntu precise-security main restricted
-deb http://10.24.17.167:3142/journey.digium.internal/ubuntu precise-security universe
-""")
-
 apt_update()
-call("apt-get install -y build-essential tig git vim python-libpcap")
+call("apt-get install -y build-essential tig subversion git vim python-libpcap debconf-utils")
 call("apt-get install -y gcc libncurses-dev libnewt-dev libtool make linux-headers-$(uname -r)")
 call('echo "grub-pc grub-pc/install_devices multiselect /dev/sda" | debconf-set-selections')
+call('echo "libvpb0 libvpb0/countrycode string  1" | debconf-set-selections')
 call("apt-get -y dist-upgrade")
 
-if os.path.exists("/usr/src/dahdi-tools"):
-    os.chdir("/usr/src/dahdi-tools")
-    call("git fetch -q; git reset -q --hard origin/master")
-    source_version = call_output("git log -1 --oneline | cut -f 1 -d \ ")
-    installed_version = dahdi_tools_installed_version()
-    if installed_version != source_version:
-        call("./configure; make; make install; make config")
-else:
-    # Dahdi linux needs to be installed in order to build dahdi_tools
-    if os.path.exists("/usr/src/dahdi-linux"):
-        os.chdir("/usr/src/dahdi-linux")
-        call("git fetch -q; git reset -q --hard origin/master")
-    else:
-        os.chdir("/usr/src")
-        call("git clone git://git.asterisk.org/dahdi/linux dahdi-linux")
-        os.chdir("/usr/src/dahdi-linux")
-    call("make install")
-
-    os.chdir("/usr/src")
-    call("git clone git://git.asterisk.org/dahdi/tools dahdi-tools")
-    os.chdir("/usr/src/dahdi-tools")
-    call("./configure; make; make install; make config")
-
-if os.path.exists("/usr/src/mytools"):
-    os.chdir("/usr/src/mytools")
-    call("git fetch -q; git reset -q --hard origin/master")
-else:
-    os.chdir("/usr/src")
-    call("git clone git://git.digium.internal/team/sruffell/mytools")
+setup_dahdi_linux()
+setup_libpri()
+setup_asterisk()
+setup_my_tools()
 
 
 call("mkdir -p /etc/dahdi/")
@@ -100,8 +126,10 @@ dchan=48
 echocanceller=mg2,1-23
 dynamic=loc,2:2,2,0
 fxoks=49-50
+echocanceller=mg2,49-50
 dynamic=loc,2:3,2,0
 fxsks=51-52
+echocanceller=mg2,51-52
 loadzone        = us
 defaultzone     = us
 """)
