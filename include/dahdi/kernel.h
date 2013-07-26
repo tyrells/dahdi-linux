@@ -439,12 +439,18 @@ struct dahdi_sf_params {
 /* These are the parameters necessary for channels that support analog / RBS
  * signalling. */
 struct dahdi_chan_analog {
+	/*! Idle signalling if CAS signalling */
+	int idlebits;
 };
 
 /* These are the parameters necesary for the channels supporting digital
  * signalling (HDLC / PRI) */
 struct dahdi_chan_digital {
 	struct dahdi_hdlc *hdlcnetdev;
+	/* HDLC state machines */
+	struct fasthdlc_state txhdlc;
+	struct fasthdlc_state rxhdlc;
+	int infcs;
 };
 
 struct dahdi_chan {
@@ -558,11 +564,6 @@ struct dahdi_chan {
 	/* I/O Mask */	
 	unsigned int iomask;  /*! I/O Mux signal mask */
 	
-	/* HDLC state machines */
-	struct fasthdlc_state txhdlc;
-	struct fasthdlc_state rxhdlc;
-	int infcs;
-
 	/* Conferencing stuff */
 	int		confna;	/*! conference number (alias) */
 	int		_confn;	/*! Actual conference number */
@@ -583,16 +584,6 @@ struct dahdi_chan {
 	short	conflast[DAHDI_MAX_CHUNKSIZE];			/*!< Last conference sample -- base part of channel */
 	short	conflast1[DAHDI_MAX_CHUNKSIZE];		/*!< Last conference sample  -- pseudo part of channel */
 	short	conflast2[DAHDI_MAX_CHUNKSIZE];		/*!< Previous last conference sample -- pseudo part of channel */
-
-
-	/*! The echo canceler module that should be used to create an
-	   instance when this channel needs one */
-	const struct dahdi_echocan_factory *ec_factory;
-	/*! The echo canceler module that owns the instance currently
-	   on this channel, if one is present */
-	const struct dahdi_echocan_factory *ec_current;
-	/*! The state data of the echo canceler instance in use */
-	struct dahdi_echocan_state *ec_state;
 
 	struct dahdi_rbs_config rbs;
 
@@ -623,8 +614,17 @@ struct dahdi_chan {
 	int txhooksig;
 	int kewlonhook;
 
-	/*! Idle signalling if CAS signalling */
-	int idlebits;
+
+
+	/*! The echo canceler module that should be used to create an
+	   instance when this channel needs one */
+	const struct dahdi_echocan_factory *ec_factory;
+	/*! The echo canceler module that owns the instance currently
+	   on this channel, if one is present */
+	const struct dahdi_echocan_factory *ec_current;
+	/*! The state data of the echo canceler instance in use */
+	struct dahdi_echocan_state *ec_state;
+
 
 	int deflaw;		/*! 1 = mulaw, 2=alaw, 0=undefined */
 	short *xlaw;
