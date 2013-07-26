@@ -437,10 +437,6 @@ struct dahdi_sf_params {
 };
 
 struct dahdi_chan {
-#ifdef CONFIG_DAHDI_NET
-	/*! \note Must be first */
-	struct dahdi_hdlc *hdlcnetdev;
-#endif
 #ifdef CONFIG_DAHDI_PPP
 	struct ppp_channel *ppp;
 	struct tasklet_struct ppp_calls;
@@ -464,6 +460,11 @@ struct dahdi_chan {
 	struct dahdi_chan *master;	/*!< Our Master channel (could be us) */
 	/*! \brief Next slave (if appropriate) */
 	struct dahdi_chan *nextslave;
+
+#ifdef CONFIG_DAHDI_NET
+	/*! \note Must be first */
+	struct dahdi_hdlc *hdlcnetdev;
+#endif
 
 	u_char *writechunk;						/*!< Actual place to write to */
 	u_char swritechunk[DAHDI_MAX_CHUNKSIZE];	/*!< Buffer to be written */

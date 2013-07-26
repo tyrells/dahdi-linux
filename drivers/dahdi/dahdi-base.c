@@ -10406,6 +10406,10 @@ static int __init dahdi_init(void)
 	int res = 0;
 
 	module_printk(KERN_INFO, "Version: %s\n", dahdi_version);
+
+	/* TODO: Just for development purposes. */
+	pr_info("sizeof(struct dahdi_chan) = %lu\n", (unsigned long)sizeof(struct dahdi_chan));
+
 #ifdef CONFIG_PROC_FS
 	root_proc_entry = proc_mkdir("dahdi", NULL);
 	if (!root_proc_entry) {
