@@ -93,7 +93,7 @@
 
 #define hdlc_to_chan(h) (((struct dahdi_hdlc *)(h))->chan)
 #define netdev_to_chan(h) (((struct dahdi_hdlc *)(dev_to_hdlc(h)->priv))->chan)
-#define chan_to_netdev(h) ((h)->hdlcnetdev->netdev)
+#define chan_to_netdev(h) ((h)->t.d.hdlcnetdev->netdev)
 
 /* macro-oni for determining a unit (channel) number */
 #define	UNIT(file) MINOR(file->f_dentry->d_inode->i_rdev)
@@ -2300,10 +2300,10 @@ static void dahdi_chan_unreg(struct dahdi_chan *chan)
 
 #ifdef CONFIG_DAHDI_NET
 	if (dahdi_have_netdev(chan)) {
-		unregister_hdlc_device(chan->hdlcnetdev->netdev);
-		free_netdev(chan->hdlcnetdev->netdev);
-		kfree(chan->hdlcnetdev);
-		chan->hdlcnetdev = NULL;
+		unregister_hdlc_device(chan->t.d.hdlcnetdev->netdev);
+		free_netdev(chan->t.d.hdlcnetdev->netdev);
+		kfree(chan->t.d.hdlcnetdev);
+		chan->t.d.hdlcnetdev = NULL;
 	}
 #endif
 	clear_bit(DAHDI_FLAGBIT_REGISTERED, &chan->flags);
@@ -4778,11 +4778,11 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 			return -EBUSY;
 		}
 		spin_unlock_irqrestore(&chan->lock, flags);
-		unregister_hdlc_device(chan->hdlcnetdev->netdev);
+		unregister_hdlc_device(chan->t.d.hdlcnetdev->netdev);
 		spin_lock_irqsave(&chan->lock, flags);
-		free_netdev(chan->hdlcnetdev->netdev);
-		kfree(chan->hdlcnetdev);
-		chan->hdlcnetdev = NULL;
+		free_netdev(chan->t.d.hdlcnetdev->netdev);
+		kfree(chan->t.d.hdlcnetdev);
+		chan->t.d.hdlcnetdev = NULL;
 		clear_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
 	}
 #else
@@ -4891,30 +4891,30 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 	if (!res &&
 	    (newmaster == chan) &&
 	    (chan->sig == DAHDI_SIG_HDLCNET)) {
-		chan->hdlcnetdev = dahdi_hdlc_alloc();
-		if (chan->hdlcnetdev) {
+		chan->t.d.hdlcnetdev = dahdi_hdlc_alloc();
+		if (chan->t.d.hdlcnetdev) {
 /*				struct hdlc_device *hdlc = chan->hdlcnetdev;
 			struct net_device *d = hdlc_to_dev(hdlc); mmm...get it right later --byg */
 
-			chan->hdlcnetdev->netdev = alloc_hdlcdev(chan->hdlcnetdev);
-			if (chan->hdlcnetdev->netdev) {
-				chan->hdlcnetdev->chan = chan;
+			chan->t.d.hdlcnetdev->netdev = alloc_hdlcdev(chan->t.d.hdlcnetdev);
+			if (chan->t.d.hdlcnetdev->netdev) {
+				chan->t.d.hdlcnetdev->chan = chan;
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2, 6, 23)
 				SET_MODULE_OWNER(chan->hdlcnetdev->netdev);
 #endif
-				chan->hdlcnetdev->netdev->tx_queue_len = 50;
+				chan->t.d.hdlcnetdev->netdev->tx_queue_len = 50;
 #ifdef HAVE_NET_DEVICE_OPS
-				chan->hdlcnetdev->netdev->netdev_ops = &dahdi_netdev_ops;
+				chan->t.d.hdlcnetdev->netdev->netdev_ops = &dahdi_netdev_ops;
 #else
 				chan->hdlcnetdev->netdev->do_ioctl = dahdi_net_ioctl;
 				chan->hdlcnetdev->netdev->open = dahdi_net_open;
 				chan->hdlcnetdev->netdev->stop = dahdi_net_stop;
 #endif
-				dev_to_hdlc(chan->hdlcnetdev->netdev)->attach = dahdi_net_attach;
-				dev_to_hdlc(chan->hdlcnetdev->netdev)->xmit = dahdi_xmit;
+				dev_to_hdlc(chan->t.d.hdlcnetdev->netdev)->attach = dahdi_net_attach;
+				dev_to_hdlc(chan->t.d.hdlcnetdev->netdev)->xmit = dahdi_xmit;
 				spin_unlock_irqrestore(&chan->lock, flags);
 				/* Briefly restore interrupts while we register the device */
-				res = dahdi_register_hdlc_device(chan->hdlcnetdev->netdev, ch.netdev_name);
+				res = dahdi_register_hdlc_device(chan->t.d.hdlcnetdev->netdev, ch.netdev_name);
 				spin_lock_irqsave(&chan->lock, flags);
 			} else {
 				module_printk(KERN_NOTICE, "Unable to allocate hdlc: *shrug*\n");
@@ -9164,7 +9164,7 @@ static void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
 							skb_put(skb, ms->readn[ms->inreadbuf]);
 #ifdef CONFIG_DAHDI_NET
 							if (dahdi_have_netdev(ms)) {
-								struct net_device_stats *stats = hdlc_stats(ms->hdlcnetdev->netdev);
+								struct net_device_stats *stats = hdlc_stats(ms->t.d.hdlcnetdev->netdev);
 								stats->rx_packets++;
 								stats->rx_bytes += ms->readn[ms->inreadbuf];
 							}
@@ -9173,7 +9173,7 @@ static void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
 						} else {
 #ifdef CONFIG_DAHDI_NET
 							if (dahdi_have_netdev(ms)) {
-								struct net_device_stats *stats = hdlc_stats(ms->hdlcnetdev->netdev);
+								struct net_device_stats *stats = hdlc_stats(ms->t.d.hdlcnetdev->netdev);
 								stats->rx_dropped++;
 							}
 #endif
@@ -9263,7 +9263,7 @@ that the waitqueue is empty. */
 
 #ifdef CONFIG_DAHDI_NET
 				if (dahdi_have_netdev(ms)) {
-					struct net_device_stats *stats = hdlc_stats(ms->hdlcnetdev->netdev);
+					struct net_device_stats *stats = hdlc_stats(ms->t.d.hdlcnetdev->netdev);
 					stats->rx_errors++;
 					if (abort == DAHDI_EVENT_OVERRUN)
 						stats->rx_over_errors++;

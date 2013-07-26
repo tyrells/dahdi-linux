@@ -436,6 +436,17 @@ struct dahdi_sf_params {
 	struct sf_detect_state rd;
 };
 
+/* These are the parameters necessary for channels that support analog / RBS
+ * signalling. */
+struct dahdi_chan_analog {
+};
+
+/* These are the parameters necesary for the channels supporting digital
+ * signalling (HDLC / PRI) */
+struct dahdi_chan_digital {
+	struct dahdi_hdlc *hdlcnetdev;
+};
+
 struct dahdi_chan {
 #ifdef CONFIG_DAHDI_PPP
 	struct ppp_channel *ppp;
@@ -463,10 +474,11 @@ struct dahdi_chan {
 	/*! \brief Next slave (if appropriate) */
 	struct dahdi_chan *nextslave;
 
-#ifdef CONFIG_DAHDI_NET
-	/*! \note Must be first */
-	struct dahdi_hdlc *hdlcnetdev;
-#endif
+	/* Different types of channels do not need all the members. */
+	union {
+		struct dahdi_chan_analog a;
+		struct dahdi_chan_digital d;
+	} t;
 
 	u_char *writechunk;						/*!< Actual place to write to */
 	u_char swritechunk[DAHDI_MAX_CHUNKSIZE];	/*!< Buffer to be written */
