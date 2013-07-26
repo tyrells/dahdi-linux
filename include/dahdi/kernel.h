@@ -441,6 +441,7 @@ struct dahdi_sf_params {
 struct dahdi_chan_analog {
 	/*! Idle signalling if CAS signalling */
 	int idlebits;
+	struct dahdi_rbs_config rbs;
 };
 
 /* These are the parameters necesary for the channels supporting digital
@@ -584,8 +585,6 @@ struct dahdi_chan {
 	short	conflast[DAHDI_MAX_CHUNKSIZE];			/*!< Last conference sample -- base part of channel */
 	short	conflast1[DAHDI_MAX_CHUNKSIZE];		/*!< Last conference sample  -- pseudo part of channel */
 	short	conflast2[DAHDI_MAX_CHUNKSIZE];		/*!< Previous last conference sample -- pseudo part of channel */
-
-	struct dahdi_rbs_config rbs;
 
 	/*! RING debounce timer */
 	int	ringdebtimer;
