@@ -442,6 +442,13 @@ struct dahdi_chan_analog {
 	/*! Idle signalling if CAS signalling */
 	int idlebits;
 	struct dahdi_rbs_config rbs;
+
+	/* Pulse dial stuff */
+	int	pdialcount;			/*!< pulse dial count */
+
+	/*! Ring cadence */
+	int ringcadence[DAHDI_MAX_CADENCE];
+	int firstcadencepos;				/*!< Where to restart ring cadence */
 };
 
 /* These are the parameters necesary for the channels supporting digital
@@ -552,13 +559,6 @@ struct dahdi_chan {
 	struct dahdi_tone *curtone;		/*!< Current tone we're playing (if any) */
 	int		tonep;					/*!< Current position in tone */
 	struct dahdi_tone_state ts;		/*!< Tone state */
-
-	/* Pulse dial stuff */
-	int	pdialcount;			/*!< pulse dial count */
-
-	/*! Ring cadence */
-	int ringcadence[DAHDI_MAX_CADENCE];
-	int firstcadencepos;				/*!< Where to restart ring cadence */
 
 	/* Digit string dialing stuff */
 	int		digitmode;			/*!< What kind of tones are we sending? */

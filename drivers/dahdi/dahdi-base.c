@@ -1573,7 +1573,7 @@ static void close_channel(struct dahdi_chan *chan)
 		tone_zone_put(zone);
 	}
 	chan->cadencepos = 0;
-	chan->pdialcount = 0;
+	chan->t.a.pdialcount = 0;
 	dahdi_hangup(chan);
 	chan->itimerset = chan->itimer = 0;
 	chan->pulsecount = 0;
@@ -1761,7 +1761,7 @@ static int start_tone(struct dahdi_chan *chan, int tone)
 	/* Stop the current tone, no matter what */
 	chan->tonep = 0;
 	chan->curtone = NULL;
-	chan->pdialcount = 0;
+	chan->t.a.pdialcount = 0;
 	chan->txdialbuf[0] = '\0';
 	chan->dialing = 0;
 
@@ -1833,7 +1833,7 @@ static int set_tone_zone(struct dahdi_chan *chan, int zone)
 		tone_zone_put(zone);
 	}
 	chan->curzone = z;
-	memcpy(chan->ringcadence, z->ringcadence, sizeof(chan->ringcadence));
+	memcpy(chan->t.a.ringcadence, z->ringcadence, sizeof(chan->t.a.ringcadence));
 	spin_unlock_irqrestore(&chan->lock, flags);
 
 	return res;
@@ -2500,12 +2500,12 @@ static ssize_t dahdi_chan_write(struct file *file, const char __user *usrbuf,
 
 	for (;;) {
 		spin_lock_irqsave(&chan->lock, flags);
-		if ((chan->curtone || chan->pdialcount) && !is_pseudo_chan(chan)) {
+		if ((chan->curtone || chan->t.a.pdialcount) && !is_pseudo_chan(chan)) {
 			chan->curtone = NULL;
 			chan->tonep = 0;
 			chan->dialing = 0;
 			chan->txdialbuf[0] = '\0';
-			chan->pdialcount = 0;
+			chan->t.a.pdialcount = 0;
 		}
 		if (chan->eventinidx != chan->eventoutidx) {
 			spin_unlock_irqrestore(&chan->lock, flags);
@@ -2876,7 +2876,7 @@ static int dahdi_hangup(struct dahdi_chan *chan)
 	chan->dialing = 0;
 	chan->afterdialingtimer = 0;
 	chan->curtone = NULL;
-	chan->pdialcount = 0;
+	chan->t.a.pdialcount = 0;
 	chan->cadencepos = 0;
 	chan->txdialbuf[0] = 0;
 
@@ -2910,7 +2910,7 @@ static int initialize_channel(struct dahdi_chan *chan)
 	chan->afterdialingtimer = 0;
 
 	chan->cadencepos = 0;
-	chan->firstcadencepos = 0; /* By default loop back to first cadence position */
+	chan->t.a.firstcadencepos = 0; /* By default loop back to first cadence position */
 
 	if (CHAN_TYPE_DIGITAL == chan->type) {
 		fasthdlc_init(&chan->t.d.rxhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
@@ -2965,7 +2965,7 @@ static int initialize_channel(struct dahdi_chan *chan)
 	chan->gotgs = 0;
 	chan->curtone = NULL;
 	chan->tonep = 0;
-	chan->pdialcount = 0;
+	chan->t.a.pdialcount = 0;
 	if (is_gain_allocated(chan))
 		rxgain = chan->rxgain;
 	chan->rxgain = defgain;
@@ -2984,12 +2984,12 @@ static int initialize_channel(struct dahdi_chan *chan)
 	chan->flags &= ~DAHDI_FLAG_LINEAR;
 	if (chan->curzone) {
 		/* Take cadence from tone zone */
-		memcpy(chan->ringcadence, chan->curzone->ringcadence, sizeof(chan->ringcadence));
+		memcpy(chan->t.a.ringcadence, chan->curzone->ringcadence, sizeof(chan->t.a.ringcadence));
 	} else {
 		/* Do a default */
-		memset(chan->ringcadence, 0, sizeof(chan->ringcadence));
-		chan->ringcadence[0] = chan->t.a.rbs.starttime;
-		chan->ringcadence[1] = DAHDI_RINGOFFTIME;
+		memset(chan->t.a.ringcadence, 0, sizeof(chan->t.a.ringcadence));
+		chan->t.a.ringcadence[0] = chan->t.a.rbs.starttime;
+		chan->t.a.ringcadence[1] = DAHDI_RINGOFFTIME;
 	}
 
 	if (ec_state) {
@@ -3752,7 +3752,7 @@ static void __do_dtmf(struct dahdi_chan *chan)
 		default:
 			if ((c != 'W') && (chan->digitmode == DIGIT_MODE_PULSE)) {
 				if ((c >= '0') && (c <= '9') && (chan->txhooksig == DAHDI_TXSIG_OFFHOOK)) {
-					chan->pdialcount = (c == '0') ? 10 : c - '0';
+					chan->t.a.pdialcount = (c == '0') ? 10 : c - '0';
 					dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_PULSEBREAK,
 						       chan->t.a.rbs.pulsebreaktime);
 					return;
@@ -4338,7 +4338,7 @@ static int dahdi_ioctl_setparams(struct file *file, unsigned long data)
 	chan->t.a.rbs.starttime = param.starttime;
 	/* Update ringtime if not using a tone zone */
 	if (!chan->curzone)
-		chan->ringcadence[0] = chan->t.a.rbs.starttime;
+		chan->t.a.ringcadence[0] = chan->t.a.rbs.starttime;
 	chan->t.a.rbs.rxwinktime = param.rxwinktime;
 	chan->t.a.rbs.rxflashtime = param.rxflashtime;
 	chan->t.a.rbs.debouncetime = param.debouncetime;
@@ -5578,7 +5578,7 @@ static int ioctl_dahdi_dial(struct dahdi_chan *chan, unsigned long data)
 		chan->dialing = 0;
 		chan->txdialbuf[0] = '\0';
 		chan->tonep = 0;
-		chan->pdialcount = 0;
+		chan->t.a.pdialcount = 0;
 		break;
 	case DAHDI_DIAL_OP_REPLACE:
 		strcpy(chan->txdialbuf, tdo->dialstr);
@@ -6233,33 +6233,33 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 					   sizeof(stack.cad))) {
 				return -EFAULT;
 			}
-			memcpy(chan->ringcadence, &stack.cad, sizeof(chan->ringcadence));
-			chan->firstcadencepos = 0;
+			memcpy(chan->t.a.ringcadence, &stack.cad, sizeof(chan->t.a.ringcadence));
+			chan->t.a.firstcadencepos = 0;
 			/* Looking for negative ringing time indicating where to loop back into ringcadence */
 			for (i=0; i<DAHDI_MAX_CADENCE; i+=2 ) {
-				if (chan->ringcadence[i]<0) {
-					chan->ringcadence[i] *= -1;
-					chan->firstcadencepos = i;
+				if (chan->t.a.ringcadence[i]<0) {
+					chan->t.a.ringcadence[i] *= -1;
+					chan->t.a.firstcadencepos = i;
 					break;
 				}
 			}
 		} else {
 			/* Reset to default */
-			chan->firstcadencepos = 0;
+			chan->t.a.firstcadencepos = 0;
 			if (chan->curzone) {
-				memcpy(chan->ringcadence, chan->curzone->ringcadence, sizeof(chan->ringcadence));
+				memcpy(chan->t.a.ringcadence, chan->curzone->ringcadence, sizeof(chan->t.a.ringcadence));
 				/* Looking for negative ringing time indicating where to loop back into ringcadence */
 				for (i=0; i<DAHDI_MAX_CADENCE; i+=2 ) {
-					if (chan->ringcadence[i]<0) {
-						chan->ringcadence[i] *= -1;
-						chan->firstcadencepos = i;
+					if (chan->t.a.ringcadence[i]<0) {
+						chan->t.a.ringcadence[i] *= -1;
+						chan->t.a.firstcadencepos = i;
 						break;
 					}
 				}
 			} else {
-				memset(chan->ringcadence, 0, sizeof(chan->ringcadence));
-				chan->ringcadence[0] = chan->t.a.rbs.starttime;
-				chan->ringcadence[1] = DAHDI_RINGOFFTIME;
+				memset(chan->t.a.ringcadence, 0, sizeof(chan->t.a.ringcadence));
+				chan->t.a.ringcadence[0] = chan->t.a.rbs.starttime;
+				chan->t.a.ringcadence[1] = DAHDI_RINGOFFTIME;
 			}
 		}
 		break;
@@ -6762,7 +6762,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 		chan->dialing = 0;
 		chan->txdialbuf[0] = '\0';
 		chan->tonep = 0;
-		chan->pdialcount = 0;
+		chan->t.a.pdialcount = 0;
 		spin_unlock_irqrestore(&chan->lock, flags);
 		if (chan->span->flags & DAHDI_FLAG_RBS) {
 			switch (j) {
@@ -6796,7 +6796,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 				if (chan->sig & __DAHDI_SIG_FXO) {
 					ret = 0;
 					chan->cadencepos = 0;
-					ret = chan->ringcadence[0];
+					ret = chan->t.a.ringcadence[0];
 					dahdi_rbs_sethook(chan, DAHDI_TXSIG_START, DAHDI_TXSTATE_RINGON, ret);
 				} else
 					dahdi_rbs_sethook(chan, DAHDI_TXSIG_START, DAHDI_TXSTATE_START, chan->t.a.rbs.starttime);
@@ -8228,12 +8228,12 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		/* Turn on the ringer now that the silent time has passed */
 		++chan->cadencepos;
 		if (chan->cadencepos >= DAHDI_MAX_CADENCE)
-			chan->cadencepos = chan->firstcadencepos;
-		len = chan->ringcadence[chan->cadencepos];
+			chan->cadencepos = chan->t.a.firstcadencepos;
+		len = chan->t.a.ringcadence[chan->cadencepos];
 
 		if (!len) {
-			chan->cadencepos = chan->firstcadencepos;
-			len = chan->ringcadence[chan->cadencepos];
+			chan->cadencepos = chan->t.a.firstcadencepos;
+			len = chan->t.a.ringcadence[chan->cadencepos];
 		}
 
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_START, DAHDI_TXSTATE_RINGON, len);
@@ -8245,7 +8245,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		++chan->cadencepos;
 		if (chan->cadencepos >= DAHDI_MAX_CADENCE)
 			chan->cadencepos = 0;
-		len = chan->ringcadence[chan->cadencepos];
+		len = chan->t.a.ringcadence[chan->cadencepos];
 
 		if (!len) {
 			chan->cadencepos = 0;
@@ -8324,9 +8324,9 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		break;
 
 	case DAHDI_TXSTATE_PULSEMAKE:
-		if (chan->pdialcount)
-			chan->pdialcount--;
-		if (chan->pdialcount)
+		if (chan->t.a.pdialcount)
+			chan->t.a.pdialcount--;
+		if (chan->t.a.pdialcount)
 		{
 			dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK,
 				DAHDI_TXSTATE_PULSEBREAK, chan->t.a.rbs.pulsebreaktime);
