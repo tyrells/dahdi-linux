@@ -454,6 +454,10 @@ struct dahdi_chan_digital {
 	int infcs;
 };
 
+/* The type is used to control which fields in the 't' union are active. */
+enum dahdi_chan_type { CHAN_TYPE_UNKNOWN=0, CHAN_TYPE_DIGITAL,
+		       CHAN_TYPE_ANALOG };
+
 struct dahdi_chan {
 #ifdef CONFIG_DAHDI_PPP
 	struct ppp_channel *ppp;
@@ -486,6 +490,7 @@ struct dahdi_chan {
 		struct dahdi_chan_analog a;
 		struct dahdi_chan_digital d;
 	} t;
+	enum dahdi_chan_type type;
 
 	u_char *writechunk;						/*!< Actual place to write to */
 	u_char swritechunk[DAHDI_MAX_CHUNKSIZE];	/*!< Buffer to be written */

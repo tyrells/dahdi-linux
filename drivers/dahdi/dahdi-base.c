@@ -1949,6 +1949,7 @@ static int dahdi_net_open(struct net_device *dev)
 {
 	int res = hdlc_open(dev);
 	struct dahdi_chan *ms = netdev_to_chan(dev);
+	WARN_ON_ONCE(CHAN_TYPE_DIGITAL != ms->type);
 
 /*	if (!dev->hard_start_xmit) return res; is this really necessary? --byg */
 	if (res) /* this is necessary to avoid kernel panic when UNSPEC link encap, proven --byg */
@@ -2300,6 +2301,7 @@ static void dahdi_chan_unreg(struct dahdi_chan *chan)
 
 #ifdef CONFIG_DAHDI_NET
 	if (dahdi_have_netdev(chan)) {
+		WARN_ON_ONCE(CHAN_TYPE_DIGITAL != chan->type);
 		unregister_hdlc_device(chan->t.d.hdlcnetdev->netdev);
 		free_netdev(chan->t.d.hdlcnetdev->netdev);
 		kfree(chan->t.d.hdlcnetdev);
@@ -2910,27 +2912,30 @@ static int initialize_channel(struct dahdi_chan *chan)
 	chan->cadencepos = 0;
 	chan->firstcadencepos = 0; /* By default loop back to first cadence position */
 
-	/* HDLC & FCS stuff */
-	fasthdlc_init(&chan->t.d.rxhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
-	fasthdlc_init(&chan->t.d.txhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
-	chan->t.d.infcs = PPP_INITFCS;
+	if (CHAN_TYPE_DIGITAL == chan->type) {
+		fasthdlc_init(&chan->t.d.rxhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
+		fasthdlc_init(&chan->t.d.txhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
+		chan->t.d.infcs = PPP_INITFCS;
+	} else if (CHAN_TYPE_ANALOG == chan->type) {
+		/* Timings for RBS */
+		chan->t.a.rbs.prewinktime = DAHDI_DEFAULT_PREWINKTIME;
+		chan->t.a.rbs.preflashtime = DAHDI_DEFAULT_PREFLASHTIME;
+		chan->t.a.rbs.winktime = DAHDI_DEFAULT_WINKTIME;
+		chan->t.a.rbs.flashtime = DAHDI_DEFAULT_FLASHTIME;
 
-	/* Timings for RBS */
-	chan->t.a.rbs.prewinktime = DAHDI_DEFAULT_PREWINKTIME;
-	chan->t.a.rbs.preflashtime = DAHDI_DEFAULT_PREFLASHTIME;
-	chan->t.a.rbs.winktime = DAHDI_DEFAULT_WINKTIME;
-	chan->t.a.rbs.flashtime = DAHDI_DEFAULT_FLASHTIME;
-
-	if (chan->sig & __DAHDI_SIG_FXO)
-		chan->t.a.rbs.starttime = DAHDI_DEFAULT_RINGTIME;
-	else
-		chan->t.a.rbs.starttime = DAHDI_DEFAULT_STARTTIME;
-	chan->t.a.rbs.rxwinktime = DAHDI_DEFAULT_RXWINKTIME;
-	chan->t.a.rbs.rxflashtime = DAHDI_DEFAULT_RXFLASHTIME;
-	chan->t.a.rbs.debouncetime = DAHDI_DEFAULT_DEBOUNCETIME;
-	chan->t.a.rbs.pulsemaketime = DAHDI_DEFAULT_PULSEMAKETIME;
-	chan->t.a.rbs.pulsebreaktime = DAHDI_DEFAULT_PULSEBREAKTIME;
-	chan->t.a.rbs.pulseaftertime = DAHDI_DEFAULT_PULSEAFTERTIME;
+		if (chan->sig & __DAHDI_SIG_FXO)
+			chan->t.a.rbs.starttime = DAHDI_DEFAULT_RINGTIME;
+		else
+			chan->t.a.rbs.starttime = DAHDI_DEFAULT_STARTTIME;
+		chan->t.a.rbs.rxwinktime = DAHDI_DEFAULT_RXWINKTIME;
+		chan->t.a.rbs.rxflashtime = DAHDI_DEFAULT_RXFLASHTIME;
+		chan->t.a.rbs.debouncetime = DAHDI_DEFAULT_DEBOUNCETIME;
+		chan->t.a.rbs.pulsemaketime = DAHDI_DEFAULT_PULSEMAKETIME;
+		chan->t.a.rbs.pulsebreaktime = DAHDI_DEFAULT_PULSEBREAKTIME;
+		chan->t.a.rbs.pulseaftertime = DAHDI_DEFAULT_PULSEAFTERTIME;
+	} else {
+		WARN_ON_ONCE(1);
+	}
 
 	/* Initialize RBS timers */
 	chan->itimerset = chan->itimer = chan->otimer = 0;
@@ -4772,6 +4777,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 	spin_lock_irqsave(&chan->lock, flags);
 #ifdef CONFIG_DAHDI_NET
 	if (dahdi_have_netdev(chan)) {
+		WARN_ON_ONCE(CHAN_TYPE_DIGITAL != chan->type);
 		if (chan_to_netdev(chan)->flags & IFF_UP) {
 			spin_unlock_irqrestore(&chan->lock, flags);
 			module_printk(KERN_WARNING, "Can't switch HDLC net mode on channel %s, since current interface is up\n", chan->name);
@@ -4818,15 +4824,19 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 
 	if (!res) {
 		chan->sig = ch.sigtype;
-		if (chan->sig == DAHDI_SIG_CAS)
+		if (chan->sig == DAHDI_SIG_CAS) {
+			chan->type = CHAN_TYPE_ANALOG;
 			chan->t.a.idlebits = ch.idlebits;
-		else
+		} else {
 			chan->t.a.idlebits = 0;
+		}
 		if ((ch.sigtype & DAHDI_SIG_CLEAR) == DAHDI_SIG_CLEAR) {
 			/* Set clear channel flag if appropriate */
 			chan->flags &= ~DAHDI_FLAG_AUDIO;
 			chan->flags |= DAHDI_FLAG_CLEAR;
+			chan->type = CHAN_TYPE_DIGITAL;
 		} else {
+			chan->type = CHAN_TYPE_ANALOG;
 			/* Set audio flag and not clear channel otherwise */
 			chan->flags |= DAHDI_FLAG_AUDIO;
 			chan->flags &= ~DAHDI_FLAG_CLEAR;
@@ -4834,6 +4844,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 		if ((ch.sigtype & DAHDI_SIG_HDLCRAW) == DAHDI_SIG_HDLCRAW) {
 			/* Set the HDLC flag */
 			chan->flags |= DAHDI_FLAG_HDLC;
+			chan->type = CHAN_TYPE_DIGITAL;
 		} else {
 			/* Clear the HDLC flag */
 			chan->flags &= ~DAHDI_FLAG_HDLC;
@@ -4841,6 +4852,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 		if ((ch.sigtype & DAHDI_SIG_HDLCFCS) == DAHDI_SIG_HDLCFCS) {
 			/* Set FCS to be calculated if appropriate */
 			chan->flags |= DAHDI_FLAG_FCS;
+			chan->type = CHAN_TYPE_DIGITAL;
 		} else {
 			/* Clear FCS flag */
 			chan->flags &= ~DAHDI_FLAG_FCS;
@@ -4869,6 +4881,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 			chan->flags &= ~DAHDI_FLAG_FCS;
 			chan->flags &= ~DAHDI_FLAG_HDLC;
 			chan->flags |= DAHDI_FLAG_NOSTDTXRX;
+			chan->type = CHAN_TYPE_DIGITAL;
 		} else {
 			chan->flags &= ~DAHDI_FLAG_NOSTDTXRX;
 		}
@@ -4878,6 +4891,9 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 		else
 			chan->flags &= ~DAHDI_FLAG_MTP2;
 	}
+
+
+	WARN_ON_ONCE(CHAN_TYPE_UNKNOWN == chan->type);
 
 	/* Chanconfig can block, do not call through the function pointer with
 	 * the channel lock held. */
@@ -9075,6 +9091,7 @@ static void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
 			if (left > bytes)
 				left = bytes;
 			if (ms->flags & DAHDI_FLAG_HDLC) {
+				WARN_ON_ONCE(CHAN_TYPE_DIGITAL != ms->type);
 				for (x=0;x<left;x++) {
 					/* Handle HDLC deframing */
 					fasthdlc_rx_load_nocheck(&ms->t.d.rxhdlc, *(rxb++));
@@ -9144,6 +9161,7 @@ static void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
 				    dahdi_have_netdev(ms)) {
 #ifdef CONFIG_DAHDI_NET
 #endif /* CONFIG_DAHDI_NET */
+					WARN_ON_ONCE(CHAN_TYPE_DIGITAL != ms->type);
 					/* Our network receiver logic is MUCH
 					  different.  We actually only use a single
 					  buffer */
