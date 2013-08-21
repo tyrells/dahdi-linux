@@ -1573,12 +1573,14 @@ static void close_channel(struct dahdi_chan *chan)
 		tone_zone_put(zone);
 	}
 	chan->cadencepos = 0;
-	chan->t.a.pdialcount = 0;
 	dahdi_hangup(chan);
 	chan->itimerset = chan->itimer = 0;
-	chan->pulsecount = 0;
-	chan->pulsetimer = 0;
-	chan->ringdebtimer = 0;
+	if (dahdi_chan_is_analog(chan)) {
+		chan->t.a.pulsecount = 0;
+		chan->t.a.pdialcount = 0;
+		chan->t.a.pulsetimer = 0;
+		chan->t.a.ringdebtimer = 0;
+	}
 	chan->txdialbuf[0] = '\0';
 	chan->digitmode = DIGIT_MODE_DTMF;
 	chan->dialing = 0;
@@ -1949,7 +1951,7 @@ static int dahdi_net_open(struct net_device *dev)
 {
 	int res = hdlc_open(dev);
 	struct dahdi_chan *ms = netdev_to_chan(dev);
-	WARN_ON_ONCE(CHAN_TYPE_DIGITAL != ms->type);
+	WARN_ON_ONCE(DAHDI_CHAN_TYPE_DIGITAL != ms->type);
 
 /*	if (!dev->hard_start_xmit) return res; is this really necessary? --byg */
 	if (res) /* this is necessary to avoid kernel panic when UNSPEC link encap, proven --byg */
@@ -2301,7 +2303,7 @@ static void dahdi_chan_unreg(struct dahdi_chan *chan)
 
 #ifdef CONFIG_DAHDI_NET
 	if (dahdi_have_netdev(chan)) {
-		WARN_ON_ONCE(CHAN_TYPE_DIGITAL != chan->type);
+		WARN_ON_ONCE(DAHDI_CHAN_TYPE_DIGITAL != chan->type);
 		unregister_hdlc_device(chan->t.d.hdlcnetdev->netdev);
 		free_netdev(chan->t.d.hdlcnetdev->netdev);
 		kfree(chan->t.d.hdlcnetdev);
@@ -2761,7 +2763,7 @@ static void dahdi_rbs_sethook(struct dahdi_chan *chan, int txsig, int txstate,
 	/* if tone signalling */
 	if (chan->sig == DAHDI_SIG_SF) {
 		struct dahdi_sf_params *const sf = chan->sf;
-		chan->txhooksig = txsig;
+		chan->t.a.txhooksig = txsig;
 		if (sf->txtone) { /* if set to make tone for tx */
 			if ((txsig && !(sf->toneflags & DAHDI_REVERSE_TXTONE)) ||
 			 ((!txsig) && (sf->toneflags & DAHDI_REVERSE_TXTONE))) {
@@ -2774,8 +2776,8 @@ static void dahdi_rbs_sethook(struct dahdi_chan *chan, int txsig, int txstate,
 		return;
 	}
 	if (chan->span->ops->hooksig) {
-		if (chan->txhooksig != txsig) {
-			chan->txhooksig = txsig;
+		if (chan->t.a.txhooksig != txsig) {
+			chan->t.a.txhooksig = txsig;
 			chan->span->ops->hooksig(chan, txsig);
 		}
 		chan->otimer = timeout * DAHDI_CHUNKSIZE;			/* Otimer is timer in samples */
@@ -2786,7 +2788,7 @@ static void dahdi_rbs_sethook(struct dahdi_chan *chan, int txsig, int txstate,
 #ifdef CONFIG_DAHDI_DEBUG
 				module_printk(KERN_NOTICE, "Setting bits to %d for channel %s state %d in %d signalling\n", outs[x].bits[txsig], chan->name, txsig, chan->sig);
 #endif
-				chan->txhooksig = txsig;
+				chan->t.a.txhooksig = txsig;
 				chan->txsig = outs[x].bits[txsig];
 				chan->span->ops->rbsbits(chan, chan->txsig);
 				chan->otimer = timeout * DAHDI_CHUNKSIZE;	/* Otimer is timer in samples */
@@ -2824,31 +2826,33 @@ static int dahdi_hangup(struct dahdi_chan *chan)
 	if (chan->flags & (DAHDI_FLAG_CLEAR | DAHDI_FLAG_NOSTDTXRX))
 		return -EINVAL;
 
-	chan->kewlonhook = 0;
+	if (dahdi_chan_is_analog(chan)) {
+		chan->t.a.kewlonhook = 0;
 
-	if ((chan->sig == DAHDI_SIG_FXSLS) || (chan->sig == DAHDI_SIG_FXSKS) ||
-			(chan->sig == DAHDI_SIG_FXSGS)) {
-		chan->ringdebtimer = RING_DEBOUNCE_TIME;
-	}
+		if ((chan->sig == DAHDI_SIG_FXSLS) || (chan->sig == DAHDI_SIG_FXSKS) ||
+				(chan->sig == DAHDI_SIG_FXSGS)) {
+			chan->t.a.ringdebtimer = RING_DEBOUNCE_TIME;
+		}
 
-	if (chan->span->flags & DAHDI_FLAG_RBS) {
-		if (chan->sig == DAHDI_SIG_CAS) {
-			dahdi_cas_setbits(chan, chan->t.a.idlebits);
-		} else if ((chan->sig == DAHDI_SIG_FXOKS) && (chan->txstate != DAHDI_TXSTATE_ONHOOK)
-			/* if other party is already on-hook we shouldn't do any battery drop */
-			&& !((chan->rxhooksig == DAHDI_RXSIG_ONHOOK) && (chan->itimer <= 0))) {
-			/* Do RBS signalling on the channel's behalf */
-			dahdi_rbs_sethook(chan, DAHDI_TXSIG_KEWL, DAHDI_TXSTATE_KEWL, DAHDI_KEWLTIME);
-		} else
-			dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_ONHOOK, 0);
-	} else {
-		/* Let the driver hang up the line if it wants to  */
-		if (chan->span->ops->sethook) {
-			if (chan->txhooksig != DAHDI_ONHOOK) {
-				chan->txhooksig = DAHDI_ONHOOK;
-				res = chan->span->ops->sethook(chan, DAHDI_ONHOOK);
+		if (chan->span->flags & DAHDI_FLAG_RBS) {
+			if (chan->sig == DAHDI_SIG_CAS) {
+				dahdi_cas_setbits(chan, chan->t.a.idlebits);
+			} else if ((chan->sig == DAHDI_SIG_FXOKS) && (chan->txstate != DAHDI_TXSTATE_ONHOOK)
+				/* if other party is already on-hook we shouldn't do any battery drop */
+				&& !((chan->t.a.rxhooksig == DAHDI_RXSIG_ONHOOK) && (chan->itimer <= 0))) {
+				/* Do RBS signalling on the channel's behalf */
+				dahdi_rbs_sethook(chan, DAHDI_TXSIG_KEWL, DAHDI_TXSTATE_KEWL, DAHDI_KEWLTIME);
 			} else
-				res = 0;
+				dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_ONHOOK, 0);
+		} else {
+			/* Let the driver hang up the line if it wants to  */
+			if (chan->span->ops->sethook) {
+				if (chan->t.a.txhooksig != DAHDI_ONHOOK) {
+					chan->t.a.txhooksig = DAHDI_ONHOOK;
+					res = chan->span->ops->sethook(chan, DAHDI_ONHOOK);
+				} else
+					res = 0;
+			}
 		}
 	}
 
@@ -2912,11 +2916,11 @@ static int initialize_channel(struct dahdi_chan *chan)
 	chan->cadencepos = 0;
 	chan->t.a.firstcadencepos = 0; /* By default loop back to first cadence position */
 
-	if (CHAN_TYPE_DIGITAL == chan->type) {
+	if (dahdi_chan_is_digital(chan)) {
 		fasthdlc_init(&chan->t.d.rxhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
 		fasthdlc_init(&chan->t.d.txhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
 		chan->t.d.infcs = PPP_INITFCS;
-	} else if (CHAN_TYPE_ANALOG == chan->type) {
+	} else if (dahdi_chan_is_analog(chan)) {
 		/* Timings for RBS */
 		chan->t.a.rbs.prewinktime = DAHDI_DEFAULT_PREWINKTIME;
 		chan->t.a.rbs.preflashtime = DAHDI_DEFAULT_PREFLASHTIME;
@@ -2933,13 +2937,14 @@ static int initialize_channel(struct dahdi_chan *chan)
 		chan->t.a.rbs.pulsemaketime = DAHDI_DEFAULT_PULSEMAKETIME;
 		chan->t.a.rbs.pulsebreaktime = DAHDI_DEFAULT_PULSEBREAKTIME;
 		chan->t.a.rbs.pulseaftertime = DAHDI_DEFAULT_PULSEAFTERTIME;
+
+		chan->t.a.ringdebtimer = 0;
 	} else {
-		WARN_ON_ONCE(1);
+		memset(&chan->t, 0, sizeof(chan->t));
 	}
 
 	/* Initialize RBS timers */
 	chan->itimerset = chan->itimer = chan->otimer = 0;
-	chan->ringdebtimer = 0;
 
 	/* Reset conferences */
 	reset_conf(chan);
@@ -3751,7 +3756,7 @@ static void __do_dtmf(struct dahdi_chan *chan)
 			break;
 		default:
 			if ((c != 'W') && (chan->digitmode == DIGIT_MODE_PULSE)) {
-				if ((c >= '0') && (c <= '9') && (chan->txhooksig == DAHDI_TXSIG_OFFHOOK)) {
+				if ((c >= '0') && (c <= '9') && (chan->t.a.txhooksig == DAHDI_TXSIG_OFFHOOK)) {
 					chan->t.a.pdialcount = (c == '0') ? 10 : c - '0';
 					dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_PULSEBREAK,
 						       chan->t.a.rbs.pulsebreaktime);
@@ -4193,7 +4198,7 @@ static int dahdi_ioctl_chandiag(struct file *file, unsigned long data)
 			      ec_state.status.mode, ec_state.status.pretrain_timer, ec_state.status.last_train_tap);
 	}
 	module_printk(KERN_INFO, "itimer: %d, otimer: %d, ringdebtimer: %d\n\n",
-		      temp->itimer, temp->otimer, temp->ringdebtimer);
+		      temp->itimer, temp->otimer, temp->t.a.ringdebtimer);
 
 	if (temp->curzone)
 		tone_zone_put(temp->curzone);
@@ -4240,7 +4245,7 @@ static int dahdi_ioctl_getparams(struct file *file, unsigned long data)
 			param.rxisoffhook = ((chan->rxsig & (j >> 8)) !=
 							(j & 0xff));
 		} else {
-			const int sig = chan->rxhooksig;
+			const int sig = chan->t.a.rxhooksig;
 			param.rxisoffhook = ((sig != DAHDI_RXSIG_ONHOOK) &&
 				(sig != DAHDI_RXSIG_INITIAL));
 		}
@@ -4264,8 +4269,8 @@ static int dahdi_ioctl_getparams(struct file *file, unsigned long data)
 	if (chan->span &&
 	    (chan->span->ops->rbsbits || chan->span->ops->hooksig) &&
 	    !(chan->sig & DAHDI_SIG_CLEAR)) {
-		param.rxhooksig = chan->rxhooksig;
-		param.txhooksig = chan->txhooksig;
+		param.rxhooksig = chan->t.a.rxhooksig;
+		param.txhooksig = chan->t.a.txhooksig;
 	} else {
 		param.rxhooksig = -1;
 		param.txhooksig = -1;
@@ -4777,7 +4782,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 	spin_lock_irqsave(&chan->lock, flags);
 #ifdef CONFIG_DAHDI_NET
 	if (dahdi_have_netdev(chan)) {
-		WARN_ON_ONCE(CHAN_TYPE_DIGITAL != chan->type);
+		WARN_ON_ONCE(!dahdi_chan_is_digital(chan));
 		if (chan_to_netdev(chan)->flags & IFF_UP) {
 			spin_unlock_irqrestore(&chan->lock, flags);
 			module_printk(KERN_WARNING, "Can't switch HDLC net mode on channel %s, since current interface is up\n", chan->name);
@@ -4825,7 +4830,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 	if (!res) {
 		chan->sig = ch.sigtype;
 		if (chan->sig == DAHDI_SIG_CAS) {
-			chan->type = CHAN_TYPE_ANALOG;
+			dahdi_chan_set_type_analog(chan);
 			chan->t.a.idlebits = ch.idlebits;
 		} else {
 			chan->t.a.idlebits = 0;
@@ -4834,9 +4839,9 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 			/* Set clear channel flag if appropriate */
 			chan->flags &= ~DAHDI_FLAG_AUDIO;
 			chan->flags |= DAHDI_FLAG_CLEAR;
-			chan->type = CHAN_TYPE_DIGITAL;
+			dahdi_chan_set_type_digital(chan);
 		} else {
-			chan->type = CHAN_TYPE_ANALOG;
+			dahdi_chan_set_type_analog(chan);
 			/* Set audio flag and not clear channel otherwise */
 			chan->flags |= DAHDI_FLAG_AUDIO;
 			chan->flags &= ~DAHDI_FLAG_CLEAR;
@@ -4844,7 +4849,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 		if ((ch.sigtype & DAHDI_SIG_HDLCRAW) == DAHDI_SIG_HDLCRAW) {
 			/* Set the HDLC flag */
 			chan->flags |= DAHDI_FLAG_HDLC;
-			chan->type = CHAN_TYPE_DIGITAL;
+			dahdi_chan_set_type_digital(chan);
 		} else {
 			/* Clear the HDLC flag */
 			chan->flags &= ~DAHDI_FLAG_HDLC;
@@ -4852,7 +4857,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 		if ((ch.sigtype & DAHDI_SIG_HDLCFCS) == DAHDI_SIG_HDLCFCS) {
 			/* Set FCS to be calculated if appropriate */
 			chan->flags |= DAHDI_FLAG_FCS;
-			chan->type = CHAN_TYPE_DIGITAL;
+			dahdi_chan_set_type_digital(chan);
 		} else {
 			/* Clear FCS flag */
 			chan->flags &= ~DAHDI_FLAG_FCS;
@@ -4881,7 +4886,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 			chan->flags &= ~DAHDI_FLAG_FCS;
 			chan->flags &= ~DAHDI_FLAG_HDLC;
 			chan->flags |= DAHDI_FLAG_NOSTDTXRX;
-			chan->type = CHAN_TYPE_DIGITAL;
+			dahdi_chan_set_type_digital(chan);
 		} else {
 			chan->flags &= ~DAHDI_FLAG_NOSTDTXRX;
 		}
@@ -4893,7 +4898,8 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 	}
 
 
-	WARN_ON_ONCE(CHAN_TYPE_UNKNOWN == chan->type);
+	WARN_ON_ONCE(!dahdi_chan_is_digital(chan) &&
+		     !dahdi_chan_is_analog(chan));
 
 	/* Chanconfig can block, do not call through the function pointer with
 	 * the channel lock held. */
@@ -4961,7 +4967,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 		y = dahdi_q_sig(chan) & 0xff;
 		if (y >= 0)
 			chan->rxsig = (unsigned char) y;
-		chan->rxhooksig = DAHDI_RXSIG_INITIAL;
+		chan->t.a.rxhooksig = DAHDI_RXSIG_INITIAL;
 	}
 #ifdef CONFIG_DAHDI_DEBUG
 	module_printk(KERN_NOTICE, "Configured channel %s, flags %04lx, sig %04x\n", chan->name, chan->flags, chan->sig);
@@ -5133,12 +5139,13 @@ static int dahdi_ioctl_startup(struct file *file, unsigned long data)
 		/* Mark as running and hangup any channels */
 		s->flags |= DAHDI_FLAG_RUNNING;
 		for (x = 0; x < s->channels; x++) {
-			y = dahdi_q_sig(s->chans[x]) & 0xff;
+			struct dahdi_chan *const c = s->chans[x];
+			y = dahdi_q_sig(c) & 0xff;
 			if (y >= 0)
-				s->chans[x]->rxsig = (unsigned char)y;
-			spin_lock_irqsave(&s->chans[x]->lock, flags);
-			dahdi_hangup(s->chans[x]);
-			spin_unlock_irqrestore(&s->chans[x]->lock, flags);
+				c->rxsig = (unsigned char)y;
+			spin_lock_irqsave(&c->lock, flags);
+			dahdi_hangup(c);
+			spin_unlock_irqrestore(&c->lock, flags);
 			/*
 			 * Set the rxhooksig back to
 			 * DAHDI_RXSIG_INITIAL so that new events are
@@ -5146,7 +5153,8 @@ static int dahdi_ioctl_startup(struct file *file, unsigned long data)
 			 * received hook state.
 			 *
 			 */
-			s->chans[x]->rxhooksig = DAHDI_RXSIG_INITIAL;
+			if (dahdi_chan_is_analog(c))
+				c->t.a.rxhooksig = DAHDI_RXSIG_INITIAL;
 		}
 
 		/* Now that this span is running, it might be selected as the
@@ -5291,9 +5299,9 @@ static int dahdi_ioctl_sfconfig(unsigned long data)
 	sf->tx_v3 = sfc.tx_v3;
 	sf->toneflags = sfc.toneflag;
 	if (sfc.txtone) { /* if set to make tone for tx */
-		if ((chan->txhooksig &&
+		if ((chan->t.a.txhooksig &&
 		     !(sfc.toneflag & DAHDI_REVERSE_TXTONE)) ||
-		     ((!chan->txhooksig) &&
+		     ((!chan->t.a.txhooksig) &&
 		       (sfc.toneflag & DAHDI_REVERSE_TXTONE))) {
 			set_txtone(sf, sfc.txtone, sfc.tx_v2, sfc.tx_v3);
 		} else {
@@ -6847,8 +6855,8 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 				return -EINVAL;
 			}
 		} else if (chan->span->ops->sethook) {
-			if (chan->txhooksig != j) {
-				chan->txhooksig = j;
+			if (chan->t.a.txhooksig != j) {
+				chan->t.a.txhooksig = j;
 				chan->span->ops->sethook(chan, j);
 			}
 		} else
@@ -8290,7 +8298,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 	case DAHDI_TXSTATE_DEBOUNCE:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_OFFHOOK, 0);
 		/* See if we've gone back on hook */
-		if ((chan->rxhooksig == DAHDI_RXSIG_ONHOOK) && (chan->t.a.rbs.rxflashtime > 2))
+		if ((chan->t.a.rxhooksig == DAHDI_RXSIG_ONHOOK) && (chan->t.a.rbs.rxflashtime > 2))
 			chan->itimerset = chan->itimer = chan->t.a.rbs.rxflashtime * DAHDI_CHUNKSIZE;
 		wake_up_interruptible(&chan->waitq);
 		break;
@@ -8310,7 +8318,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		break;
 
 	case DAHDI_TXSTATE_AFTERKEWL:
-		if (chan->kewlonhook)  {
+		if (chan->t.a.kewlonhook)  {
 			__qevent(chan,DAHDI_EVENT_ONHOOK);
 		}
 		chan->txstate = DAHDI_TXSTATE_ONHOOK;
@@ -8354,14 +8362,14 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 	/* State machines for receive hookstate transitions
 		called with chan->lock held */
 
-	if ((chan->rxhooksig) == rxsig) return;
+	if ((chan->t.a.rxhooksig) == rxsig) return;
 
 	if ((chan->flags & DAHDI_FLAG_SIGFREEZE)) return;
 
-	chan->rxhooksig = rxsig;
+	chan->t.a.rxhooksig = rxsig;
 #ifdef	RINGBEGIN
 	if ((chan->sig & __DAHDI_SIG_FXS) && (rxsig == DAHDI_RXSIG_RING) &&
-	    (!chan->ringdebtimer))
+	    (!chan->t.a.ringdebtimer))
 		__qevent(chan,DAHDI_EVENT_RINGBEGIN);
 #endif
 	switch(chan->sig) {
@@ -8449,8 +8457,8 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 		/* fall through intentionally */
 	   case DAHDI_SIG_FXSGS:  /* FXS Groundstart */
 		if (rxsig == DAHDI_RXSIG_ONHOOK) {
-			chan->ringdebtimer = RING_DEBOUNCE_TIME;
-			chan->ringtrailer = 0;
+			chan->t.a.ringdebtimer = RING_DEBOUNCE_TIME;
+			chan->t.a.ringtrailer = 0;
 			if (chan->txstate != DAHDI_TXSTATE_DEBOUNCE) {
 				chan->gotgs = 0;
 				__qevent(chan,DAHDI_EVENT_ONHOOK);
@@ -8474,7 +8482,7 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 			if (chan->txstate == DAHDI_TXSTATE_START) {
 				dahdi_rbs_sethook(chan,DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_AFTERSTART, DAHDI_AFTERSTART_TIME);
 			}
-			chan->kewlonhook = 0;
+			chan->t.a.kewlonhook = 0;
 #ifdef CONFIG_DAHDI_DEBUG
 			module_printk(KERN_NOTICE, "Off hook on channel %d, itimer = %d, gotgs = %d\n", chan->channo, chan->itimer, chan->gotgs);
 #endif
@@ -8485,10 +8493,10 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 			    {
 					if (plen >= DAHDI_MINPULSETIME)
 					{
-						chan->pulsecount++;
-						chan->pulsetimer = DAHDI_PULSETIMEOUT;
+						chan->t.a.pulsecount++;
+						chan->t.a.pulsetimer = DAHDI_PULSETIMEOUT;
 						chan->itimer = chan->itimerset;
-						if (chan->pulsecount == 1)
+						if (chan->t.a.pulsecount == 1)
 							__qevent(chan,DAHDI_EVENT_PULSE_START);
 					}
 			    } else
@@ -8511,7 +8519,7 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 				chan->itimerset = chan->itimer = chan->t.a.rbs.rxflashtime * DAHDI_CHUNKSIZE;
 			}
 			if (chan->txstate == DAHDI_TXSTATE_KEWL)
-				chan->kewlonhook = 1;
+				chan->t.a.kewlonhook = 1;
 			break;
 		    default:
 			break;
@@ -9091,7 +9099,7 @@ static void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
 			if (left > bytes)
 				left = bytes;
 			if (ms->flags & DAHDI_FLAG_HDLC) {
-				WARN_ON_ONCE(CHAN_TYPE_DIGITAL != ms->type);
+				WARN_ON_ONCE(!dahdi_chan_is_digital(ms));
 				for (x=0;x<left;x++) {
 					/* Handle HDLC deframing */
 					fasthdlc_rx_load_nocheck(&ms->t.d.rxhdlc, *(rxb++));
@@ -9161,7 +9169,7 @@ static void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
 				    dahdi_have_netdev(ms)) {
 #ifdef CONFIG_DAHDI_NET
 #endif /* CONFIG_DAHDI_NET */
-					WARN_ON_ONCE(CHAN_TYPE_DIGITAL != ms->type);
+					WARN_ON_ONCE(!dahdi_chan_is_digital(ms));
 					/* Our network receiver logic is MUCH
 					  different.  We actually only use a single
 					  buffer */
@@ -10148,38 +10156,37 @@ int _dahdi_receive(struct dahdi_span *span)
 			if (chan->itimer <= 0)
 				rbs_itimer_expire(chan);
 		}
-		if (chan->ringdebtimer)
-			chan->ringdebtimer--;
-		if (chan->sig & __DAHDI_SIG_FXS) {
-			if (chan->rxhooksig == DAHDI_RXSIG_RING)
-				chan->ringtrailer = DAHDI_RINGTRAILER;
-			else if (chan->ringtrailer) {
-				chan->ringtrailer -= DAHDI_CHUNKSIZE;
-				/* See if RING trailer is expired */
-				if (!chan->ringtrailer && !chan->ringdebtimer)
-					__qevent(chan, DAHDI_EVENT_RINGOFFHOOK);
+		if (dahdi_chan_is_analog(chan)) {
+			if (chan->t.a.ringdebtimer)
+				chan->t.a.ringdebtimer--;
+			if (chan->sig & __DAHDI_SIG_FXS) {
+				if (chan->t.a.rxhooksig == DAHDI_RXSIG_RING)
+					chan->t.a.ringtrailer = DAHDI_RINGTRAILER;
+				else if (chan->t.a.ringtrailer) {
+					chan->t.a.ringtrailer -= DAHDI_CHUNKSIZE;
+					/* See if RING trailer is expired */
+					if (!chan->t.a.ringtrailer && !chan->t.a.ringdebtimer)
+						__qevent(chan, DAHDI_EVENT_RINGOFFHOOK);
+				}
 			}
-		}
-		if (chan->pulsetimer) {
-			chan->pulsetimer--;
-			if (chan->pulsetimer <= 0) {
-				if (chan->pulsecount) {
-					if (chan->pulsecount > 12) {
-
+			if (chan->t.a.pulsetimer) {
+				chan->t.a.pulsetimer--;
+				if (chan->t.a.pulsetimer <= 0) {
+					if (chan->t.a.pulsecount > 12) {
 						module_printk(KERN_NOTICE, "Got pulse digit %d on %s???\n",
-					    chan->pulsecount,
-						chan->name);
-					} else if (chan->pulsecount > 11) {
+							      chan->t.a.pulsecount,
+							      chan->name);
+					} else if (chan->t.a.pulsecount > 11) {
 						__qevent(chan, DAHDI_EVENT_PULSEDIGIT | '#');
-					} else if (chan->pulsecount > 10) {
+					} else if (chan->t.a.pulsecount > 10) {
 						__qevent(chan, DAHDI_EVENT_PULSEDIGIT | '*');
-					} else if (chan->pulsecount > 9) {
+					} else if (chan->t.a.pulsecount > 9) {
 						__qevent(chan, DAHDI_EVENT_PULSEDIGIT | '0');
-					} else {
+					} else if (chan->t.a.pulsecount > 0) {
 						__qevent(chan, DAHDI_EVENT_PULSEDIGIT | ('0' +
-							chan->pulsecount));
+							chan->t.a.pulsecount));
 					}
-					chan->pulsecount = 0;
+					chan->t.a.pulsecount = 0;
 				}
 			}
 		}

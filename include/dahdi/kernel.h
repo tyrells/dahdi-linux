@@ -449,6 +449,21 @@ struct dahdi_chan_analog {
 	/*! Ring cadence */
 	int ringcadence[DAHDI_MAX_CADENCE];
 	int firstcadencepos;				/*!< Where to restart ring cadence */
+
+	/*! RING debounce timer */
+	int	ringdebtimer;
+	
+	/*! RING trailing detector to make sure a RING is really over */
+	int ringtrailer;
+
+	/* PULSE digit receiver stuff */
+	int	pulsecount;
+	int	pulsetimer;
+
+	/* non-RBS rx state */
+	int rxhooksig;
+	int txhooksig;
+	int kewlonhook;
 };
 
 /* These are the parameters necesary for the channels supporting digital
@@ -462,8 +477,8 @@ struct dahdi_chan_digital {
 };
 
 /* The type is used to control which fields in the 't' union are active. */
-enum dahdi_chan_type { CHAN_TYPE_UNKNOWN=0, CHAN_TYPE_DIGITAL,
-		       CHAN_TYPE_ANALOG };
+enum dahdi_chan_type { DAHDI_CHAN_TYPE_UNKNOWN=0, DAHDI_CHAN_TYPE_DIGITAL,
+		       DAHDI_CHAN_TYPE_ANALOG };
 
 struct dahdi_chan {
 #ifdef CONFIG_DAHDI_PPP
@@ -591,16 +606,6 @@ struct dahdi_chan {
 	short	conflast1[DAHDI_MAX_CHUNKSIZE];		/*!< Last conference sample  -- pseudo part of channel */
 	short	conflast2[DAHDI_MAX_CHUNKSIZE];		/*!< Previous last conference sample -- pseudo part of channel */
 
-	/*! RING debounce timer */
-	int	ringdebtimer;
-	
-	/*! RING trailing detector to make sure a RING is really over */
-	int ringtrailer;
-
-	/* PULSE digit receiver stuff */
-	int	pulsecount;
-	int	pulsetimer;
-
 	/* RBS timers */
 	int 	itimerset;		/*!< what the itimer was set to last */
 	int 	itimer;
@@ -612,13 +617,6 @@ struct dahdi_chan {
 	int rxsig;
 	int txsig;
 	int rxsigstate;
-
-	/* non-RBS rx state */
-	int rxhooksig;
-	int txhooksig;
-	int kewlonhook;
-
-
 
 	/*! The echo canceler module that should be used to create an
 	   instance when this channel needs one */
@@ -643,6 +641,26 @@ struct dahdi_chan {
 	struct device chan_device;	/*!< Kernel object for this chan */
 #define dev_to_chan(dev)    container_of(dev, struct dahdi_chan, chan_device)
 };
+
+static inline bool dahdi_chan_is_digital(const struct dahdi_chan *c)
+{
+	return (DAHDI_CHAN_TYPE_DIGITAL == c->type);
+}
+
+static inline bool dahdi_chan_is_analog(const struct dahdi_chan *c)
+{
+	return (DAHDI_CHAN_TYPE_ANALOG == c->type);
+}
+
+static inline void dahdi_chan_set_type_analog(struct dahdi_chan *c)
+{
+	c->type = DAHDI_CHAN_TYPE_ANALOG;
+}
+
+static inline void dahdi_chan_set_type_digital(struct dahdi_chan *c)
+{
+	c->type = DAHDI_CHAN_TYPE_DIGITAL;
+}
 
 #ifdef CONFIG_DAHDI_NET
 struct dahdi_hdlc {
