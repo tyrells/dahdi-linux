@@ -310,7 +310,7 @@ static DEFINE_SPINLOCK(dahdi_timer_lock);
 #define DEFAULT_TONE_ZONE (-1)
 
 struct dahdi_zone {
-	int ringcadence[DAHDI_MAX_CADENCE];
+	s16 ringcadence[DAHDI_MAX_CADENCE];
 	struct dahdi_tone *tones[DAHDI_TONE_MAX];
 	/* Each of these is a circular list
 	   of dahdi_tones to generate what we
@@ -10434,6 +10434,8 @@ static int __init dahdi_init(void)
 
 	/* TODO: Just for development purposes. */
 	pr_info("sizeof(struct dahdi_chan) = %lu\n", (unsigned long)sizeof(struct dahdi_chan));
+	pr_info("sizeof(struct dahdi_chan_digital) = %lu\n", (unsigned long)sizeof(struct dahdi_chan_digital));
+	pr_info("sizeof(struct dahdi_chan_analog) = %lu\n", (unsigned long)sizeof(struct dahdi_chan_analog));
 
 #ifdef CONFIG_PROC_FS
 	root_proc_entry = proc_mkdir("dahdi", NULL);
