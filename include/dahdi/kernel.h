@@ -445,26 +445,26 @@ struct dahdi_chan_analog {
 	u16 idlebits;
 
 	/* Pulse dial stuff */
-	s32	pdialcount;			/*!< pulse dial count */
+	s16	pdialcount;			/*!< pulse dial count */
 
 	/*! Ring cadence */
 	s16 ringcadence[DAHDI_MAX_CADENCE];
-	s32 firstcadencepos;				/*!< Where to restart ring cadence */
+	s16 firstcadencepos;				/*!< Where to restart ring cadence */
 
 	/*! RING debounce timer */
-	s32	ringdebtimer;
+	s16	ringdebtimer;
 	
 	/*! RING trailing detector to make sure a RING is really over */
-	s32 ringtrailer;
+	s16 ringtrailer;
 
 	/* PULSE digit receiver stuff */
-	s32	pulsecount;
-	s32	pulsetimer;
+	s16	pulsecount;
+	s16	pulsetimer;
 
 	/* non-RBS rx state */
-	s32 rxhooksig;
-	s32 txhooksig;
-	s32 kewlonhook;
+	s16 rxhooksig;
+	s16 txhooksig;
+	s16 kewlonhook;
 };
 
 /* These are the parameters necesary for the channels supporting digital
