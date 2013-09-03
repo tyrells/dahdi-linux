@@ -3,7 +3,7 @@ asterisk -rx 'core stop now'
 set -e
 /etc/init.d/dahdi stop
 modprobe --first-time dahdi
-dahdi_cfg -vvf
+dahdi_cfg -c /vagrant/dahdi.conf -vvf
 sleep 1
 asterisk -C /vagrant/asterisk_configs/asterisk.conf
 sleep 1
