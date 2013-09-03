@@ -19,7 +19,7 @@ def setup_dahdi_linux():
     if os.path.exists("/usr/src/dahdi-tools"):
         os.chdir("/usr/src/dahdi-tools")
         call("git fetch -q; git reset -q --hard origin/master")
-        source_version = call_output("git log -1 --oneline | cut -f 1 -d \ ")
+        source_version = call_output("build_tools/make_version .")
         installed_version = dahdi_tools_installed_version()
         if installed_version != source_version:
             call("./configure; make; make install; make config")
@@ -99,7 +99,8 @@ def dahdi_tools_installed_version():
     for line in p.stderr:
         line = line.strip()
         if line.startswith("DAHDI Tools Version"):
-            return [x.strip() for x in line.split('-', 1)][1].split('g',1)[1]
+            version = line.split('-', 1)[1].split('g',1)
+            return version[-1].strip()
 
     raise Exception("Huh? No DAHDI Tools Version printed?")
 
@@ -117,22 +118,37 @@ def disable_fsck():
     fstab.close()
     open("/etc/fstab", "w").write(new_fstab.getvalue())
 
-apt_update()
-call("apt-get install -y build-essential tig subversion git vim python-libpcap debconf-utils")
-call("apt-get install -y gcc libncurses-dev libnewt-dev libtool make linux-headers-$(uname -r)")
-call('echo "grub-pc grub-pc/install_devices multiselect /dev/sda" | debconf-set-selections')
-call('echo "libvpb0 libvpb0/countrycode string  1" | debconf-set-selections')
-call("apt-get -y dist-upgrade")
+def update_kernel_command_line():
+    new_grub = StringIO.StringIO()
+    grub = open("/etc/default/grub", "r")
+    for line in grub:
+        if not line.startswith("GRUB_CMDLINE_LINUX"):
+            new_grub.write(line)
+            continue
+        new_grub.write('GRUB_CMDLINE_LINUX="console=ttyS0,115200n81"\n')
+    grub.close()
+    open("/etc/default/grub", "w").write(new_grub.getvalue())
+    cmdline = open("/proc/cmdline").read()
+    if -1 == cmdline.find("console=ttyS0"):
+        call("update-grub")
 
-setup_dahdi_linux()
-setup_libpri()
-setup_asterisk()
-setup_my_tools()
-disble_fsck()
-
-
-call("mkdir -p /etc/dahdi/")
-open("/etc/dahdi/system.conf", "w").write("""dynamic=loc,1:0,24,0
+def main():
+    apt_update()
+    call("apt-get install -y build-essential tig subversion git vim python-libpcap debconf-utils")
+    call("apt-get install -y gcc libncurses-dev libnewt-dev libtool make linux-headers-$(uname -r)")
+    call('echo "grub-pc grub-pc/install_devices multiselect /dev/sda" | debconf-set-selections')
+    call('echo "libvpb0 libvpb0/countrycode string  1" | debconf-set-selections')
+    call("apt-get -y dist-upgrade")
+    
+    setup_dahdi_linux()
+    setup_libpri()
+    setup_asterisk()
+    setup_my_tools()
+    disable_fsck()
+    update_kernel_command_line()
+    
+    call("mkdir -p /etc/dahdi/")
+    open("/etc/dahdi/system.conf", "w").write("""dynamic=loc,1:0,24,0
 bchan=1-23
 dchan=24
 echocanceller=mg2,1-23
@@ -150,7 +166,12 @@ loadzone        = us
 defaultzone     = us
 """)
 
-print "*******************************************************************************"
-print "Please run 'vagrant halt' followed by 'vagrant up --no-provision' before       "
-print "using virtual machine."
-print "*******************************************************************************"
+    print "*******************************************************************************"
+    print "Please run 'vagrant halt' followed by 'vagrant up --no-provision' before       "
+    print "using virtual machine."
+    print "*******************************************************************************"
+    return 0
+
+if "__main__" == __name__:
+    print __name__
+    sys.exit(main())
