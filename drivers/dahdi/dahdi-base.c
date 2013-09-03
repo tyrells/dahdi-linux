@@ -4782,18 +4782,20 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 	spin_lock_irqsave(&chan->lock, flags);
 #ifdef CONFIG_DAHDI_NET
 	if (dahdi_have_netdev(chan)) {
+		struct dahdi_hdlc *hdlcnetdev;
 		WARN_ON_ONCE(!dahdi_chan_is_digital(chan));
 		if (chan_to_netdev(chan)->flags & IFF_UP) {
 			spin_unlock_irqrestore(&chan->lock, flags);
 			module_printk(KERN_WARNING, "Can't switch HDLC net mode on channel %s, since current interface is up\n", chan->name);
 			return -EBUSY;
 		}
-		spin_unlock_irqrestore(&chan->lock, flags);
-		unregister_hdlc_device(chan->t.d.hdlcnetdev->netdev);
-		spin_lock_irqsave(&chan->lock, flags);
-		free_netdev(chan->t.d.hdlcnetdev->netdev);
-		kfree(chan->t.d.hdlcnetdev);
+		hdlcnetdev = chan->t.d.hdlcnetdev;
 		chan->t.d.hdlcnetdev = NULL;
+		spin_unlock_irqrestore(&chan->lock, flags);
+		unregister_hdlc_device(hdlcnetdev->netdev);
+		free_netdev(hdlcnetdev->netdev);
+		kfree(hdlcnetdev);
+		spin_lock_irqsave(&chan->lock, flags);
 		clear_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
 	}
 #else
