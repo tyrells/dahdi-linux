@@ -1,4 +1,14 @@
 #!/bin/sh
+#
+# run_network_test.sh  -  Ensures that DAHDI operates in a basic HDLC mode.
+#
+# This test will setup two dynamic local spans in HDLC mode, and then configure
+# them to be opposite sides of a Point to Point link.  It will then send write a
+# random packet on one end and check that the data was received on the other
+# end.
+#
+# This test users libpcap in order to "listen" on one end of the link.
+#
 set -e
 
 /etc/init.d/dahdi stop

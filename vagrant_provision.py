@@ -7,6 +7,7 @@ import sys
 import subprocess
 import os
 import time
+import cStringIO as StringIO
 
 def call(command):
     return subprocess.call(command, shell=True)
@@ -102,6 +103,20 @@ def dahdi_tools_installed_version():
 
     raise Exception("Huh? No DAHDI Tools Version printed?")
 
+def disable_fsck():
+    new_fstab = StringIO.StringIO()
+    fstab = open("/etc/fstab", "r")
+    for line in fstab:
+        if line.startswith('#'):
+            new_fstab.write(line)
+            continue
+        parts = line.split()
+        if len(parts) == 6:
+            parts[5] = "0"
+        new_fstab.write(" ".join(parts) + "\n")
+    fstab.close()
+    open("/etc/fstab", "w").write(new_fstab.getvalue())
+
 apt_update()
 call("apt-get install -y build-essential tig subversion git vim python-libpcap debconf-utils")
 call("apt-get install -y gcc libncurses-dev libnewt-dev libtool make linux-headers-$(uname -r)")
@@ -113,6 +128,7 @@ setup_dahdi_linux()
 setup_libpri()
 setup_asterisk()
 setup_my_tools()
+disble_fsck()
 
 
 call("mkdir -p /etc/dahdi/")
