@@ -126,6 +126,8 @@ EXPORT_SYMBOL(dahdi_unregister_echocan_factory);
 
 EXPORT_SYMBOL(dahdi_set_hpec_ioctl);
 
+#define HERE() do { printk(KERN_DEBUG "HERE %s:%d\n", __FILE__, __LINE__); } while (0)
+
 #ifdef CONFIG_PROC_FS
 static struct proc_dir_entry *root_proc_entry;
 #endif
@@ -4909,6 +4911,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 	if (!res && chan->span->ops->chanconfig)
 		res = chan->span->ops->chanconfig(file, chan, ch.sigtype);
 
+	HERE();
 #ifdef CONFIG_DAHDI_NET
 	hdlcnetdev = NULL;
 	if (!res &&
@@ -4950,6 +4953,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 	spin_lock_irqsave(&chan->lock, flags);
 	chan->t.d.hdlcnetdev = hdlcnetdev;
 #endif
+	HERE();
 	if ((chan->sig == DAHDI_SIG_HDLCNET) &&
 	    (chan == newmaster) &&
 	    !dahdi_have_netdev(chan))
@@ -4963,7 +4967,9 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 			return -EFAULT;
 		spin_lock_irqsave(&chan->lock, flags);
 		/* And hangup */
+		HERE();
 		dahdi_hangup(chan);
+		HERE();
 		y = dahdi_q_sig(chan) & 0xff;
 		if (y >= 0)
 			chan->rxsig = (unsigned char) y;
@@ -4974,6 +4980,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 #endif
 	spin_unlock_irqrestore(&chan->lock, flags);
 
+	HERE();
 	return res;
 }
 
