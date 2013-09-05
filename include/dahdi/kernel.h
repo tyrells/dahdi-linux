@@ -665,17 +665,24 @@ static inline void dahdi_chan_set_type_digital(struct dahdi_chan *c)
 	c->type = DAHDI_CHAN_TYPE_DIGITAL;
 }
 
+#if 0
 static inline struct dahdi_chan_digital *dahdi_chan_get_digital(struct dahdi_chan *c)
 {
 	WARN_ON_ONCE(!dahdi_chan_is_digital(c));
 	return &c->_t.d;
 }
+#endif
+#define dahdi_chan_get_digital(_x_) ({ WARN_ON_ONCE(!dahdi_chan_is_digital((_x_))); &((_x_)->_t.d); })
 
+
+#if 0
 static inline struct dahdi_chan_analog *dahdi_chan_get_analog(struct dahdi_chan *c)
 {
 	WARN_ON_ONCE(!dahdi_chan_is_analog(c));
 	return &c->_t.a;
 }
+#endif
+#define dahdi_chan_get_analog(_x_) ({ WARN_ON_ONCE(!dahdi_chan_is_analog((_x_))); &((_x_)->_t.a); })
 
 #ifdef CONFIG_DAHDI_NET
 struct dahdi_hdlc {
