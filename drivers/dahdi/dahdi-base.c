@@ -6733,6 +6733,8 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 		}
 		break;
 	case DAHDI_HDLC_RATE:
+		/* This is only valid on HDLC channels, but there are versions
+		 * of dahdi_cfg that doesn't check before setting. */
 		if (dahdi_chan_is_digital(chan)) {
 			struct dahdi_chan_digital *d;
 			d = dahdi_chan_get_digital(chan);
@@ -6745,8 +6747,6 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 
 			fasthdlc_init(&d->rxhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
 			fasthdlc_init(&d->txhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
-		} else {
-			return -EINVAL;
 		}
 		break;
 	case DAHDI_ECHOCANCEL_PARAMS:
