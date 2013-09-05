@@ -6042,6 +6042,7 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 	unsigned long flags;
 	int i, j, rv;
 	void __user * const user_data = (void __user *)data;
+	struct dahdi_chan_analog *a;
 
 	if (!chan)
 		return -EINVAL;
@@ -6242,39 +6243,45 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 			chan->flags &= ~DAHDI_FLAG_LINEAR;
 		break;
 	case DAHDI_SETCADENCE:
+		a = &chan->t.a;
 		if (data) {
+			unsigned int i;
 			/* Use specific ring cadence */
 			if (copy_from_user(&stack.cad, user_data,
 					   sizeof(stack.cad))) {
 				return -EFAULT;
 			}
-			memcpy(chan->t.a.ringcadence, &stack.cad, sizeof(chan->t.a.ringcadence));
-			chan->t.a.firstcadencepos = 0;
+			BUG_ON(ARRAY_SIZE(stack.cad.ringcadence) !=
+			       ARRAY_SIZE(a->ringcadence));
+			for (i = 0; i < ARRAY_SIZE(stack.cad.ringcadence); ++i)
+				a->ringcadence[i] = (s16)stack.cad.ringcadence[i];
+
+			a->firstcadencepos = 0;
 			/* Looking for negative ringing time indicating where to loop back into ringcadence */
 			for (i=0; i<DAHDI_MAX_CADENCE; i+=2 ) {
-				if (chan->t.a.ringcadence[i]<0) {
-					chan->t.a.ringcadence[i] *= -1;
-					chan->t.a.firstcadencepos = i;
+				if (a->ringcadence[i]<0) {
+					a->ringcadence[i] *= -1;
+					a->firstcadencepos = i;
 					break;
 				}
 			}
 		} else {
 			/* Reset to default */
-			chan->t.a.firstcadencepos = 0;
+			a->firstcadencepos = 0;
 			if (chan->curzone) {
 				memcpy(chan->t.a.ringcadence, chan->curzone->ringcadence, sizeof(chan->t.a.ringcadence));
 				/* Looking for negative ringing time indicating where to loop back into ringcadence */
 				for (i=0; i<DAHDI_MAX_CADENCE; i+=2 ) {
-					if (chan->t.a.ringcadence[i]<0) {
-						chan->t.a.ringcadence[i] *= -1;
-						chan->t.a.firstcadencepos = i;
+					if (a->ringcadence[i]<0) {
+						a->ringcadence[i] *= -1;
+						a->firstcadencepos = i;
 						break;
 					}
 				}
 			} else {
-				memset(chan->t.a.ringcadence, 0, sizeof(chan->t.a.ringcadence));
-				chan->t.a.ringcadence[0] = chan->t.a.rbs.starttime;
-				chan->t.a.ringcadence[1] = DAHDI_RINGOFFTIME;
+				memset(a->ringcadence, 0, sizeof(a->ringcadence));
+				a->ringcadence[0] = a->rbs.starttime;
+				a->ringcadence[1] = DAHDI_RINGOFFTIME;
 			}
 		}
 		break;
