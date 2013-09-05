@@ -509,10 +509,10 @@ struct dahdi_chan {
 	struct dahdi_chan *nextslave;
 
 	/* Different types of channels do not need all the members. */
-	struct {
+	union {
 		struct dahdi_chan_analog a;
 		struct dahdi_chan_digital d;
-	} t;
+	} _t;
 	enum dahdi_chan_type type;
 
 	u_char *writechunk;						/*!< Actual place to write to */
@@ -655,12 +655,26 @@ static inline bool dahdi_chan_is_analog(const struct dahdi_chan *c)
 
 static inline void dahdi_chan_set_type_analog(struct dahdi_chan *c)
 {
+	WARN_ON_ONCE(c->type != DAHDI_CHAN_TYPE_UNKNOWN);
 	c->type = DAHDI_CHAN_TYPE_ANALOG;
 }
 
 static inline void dahdi_chan_set_type_digital(struct dahdi_chan *c)
 {
+	WARN_ON_ONCE(c->type != DAHDI_CHAN_TYPE_UNKNOWN);
 	c->type = DAHDI_CHAN_TYPE_DIGITAL;
+}
+
+static inline struct dahdi_chan_digital *dahdi_chan_get_digital(struct dahdi_chan *c)
+{
+	WARN_ON_ONCE(!dahdi_chan_is_digital(c));
+	return &c->_t.d;
+}
+
+static inline struct dahdi_chan_analog *dahdi_chan_get_analog(struct dahdi_chan *c)
+{
+	WARN_ON_ONCE(!dahdi_chan_is_analog(c));
+	return &c->_t.a;
 }
 
 #ifdef CONFIG_DAHDI_NET
