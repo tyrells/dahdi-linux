@@ -4811,6 +4811,7 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 		return -EINVAL;
 	}
 
+	chan->type = DAHDI_CHAN_TYPE_UNKNOWN;
 	if (ch.sigtype == DAHDI_SIG_SLAVE) {
 		newmaster = chan_from_num(ch.master);
 		if (!newmaster) {
@@ -4884,34 +4885,38 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 		if (chan->sig == DAHDI_SIG_CAS) {
 			dahdi_chan_set_type_analog(chan);
 			dahdi_chan_get_analog(chan)->idlebits = ch.idlebits;
-		}
-
-		if ((ch.sigtype & DAHDI_SIG_CLEAR) == DAHDI_SIG_CLEAR) {
+		} else if ((ch.sigtype & DAHDI_SIG_CLEAR) == DAHDI_SIG_CLEAR) {
 			/* Set clear channel flag if appropriate */
 			chan->flags &= ~DAHDI_FLAG_AUDIO;
 			chan->flags |= DAHDI_FLAG_CLEAR;
 			dahdi_chan_set_type_digital(chan);
+			if ((ch.sigtype & DAHDI_SIG_HDLCRAW) == DAHDI_SIG_HDLCRAW) {
+				/* Set the HDLC flag */
+				chan->flags |= DAHDI_FLAG_HDLC;
+			} else {
+				/* Clear the HDLC flag */
+				chan->flags &= ~DAHDI_FLAG_HDLC;
+			}
+			if ((ch.sigtype & DAHDI_SIG_HDLCFCS) == DAHDI_SIG_HDLCFCS) {
+				/* Set FCS to be calculated if appropriate */
+				chan->flags |= DAHDI_FLAG_FCS;
+			} else {
+				/* Clear FCS flag */
+				chan->flags &= ~DAHDI_FLAG_FCS;
+			}
+			if ((ch.sigtype & DAHDI_SIG_HARDHDLC) == DAHDI_SIG_HARDHDLC) {
+				chan->flags &= ~DAHDI_FLAG_FCS;
+				chan->flags &= ~DAHDI_FLAG_HDLC;
+				chan->flags |= DAHDI_FLAG_NOSTDTXRX;
+				dahdi_chan_set_type_digital(chan);
+			} else {
+				chan->flags &= ~DAHDI_FLAG_NOSTDTXRX;
+			}
 		} else {
 			dahdi_chan_set_type_analog(chan);
 			/* Set audio flag and not clear channel otherwise */
 			chan->flags |= DAHDI_FLAG_AUDIO;
 			chan->flags &= ~DAHDI_FLAG_CLEAR;
-		}
-		if ((ch.sigtype & DAHDI_SIG_HDLCRAW) == DAHDI_SIG_HDLCRAW) {
-			/* Set the HDLC flag */
-			chan->flags |= DAHDI_FLAG_HDLC;
-			dahdi_chan_set_type_digital(chan);
-		} else {
-			/* Clear the HDLC flag */
-			chan->flags &= ~DAHDI_FLAG_HDLC;
-		}
-		if ((ch.sigtype & DAHDI_SIG_HDLCFCS) == DAHDI_SIG_HDLCFCS) {
-			/* Set FCS to be calculated if appropriate */
-			chan->flags |= DAHDI_FLAG_FCS;
-			dahdi_chan_set_type_digital(chan);
-		} else {
-			/* Clear FCS flag */
-			chan->flags &= ~DAHDI_FLAG_FCS;
 		}
 		if ((ch.sigtype & __DAHDI_SIG_DACS) == __DAHDI_SIG_DACS) {
 			if (unlikely(!dacs_chan)) {
@@ -4932,14 +4937,6 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 		/* Note new slave if we are not our own master */
 		if (newmaster != chan) {
 			recalc_slaves(chan->master);
-		}
-		if ((ch.sigtype & DAHDI_SIG_HARDHDLC) == DAHDI_SIG_HARDHDLC) {
-			chan->flags &= ~DAHDI_FLAG_FCS;
-			chan->flags &= ~DAHDI_FLAG_HDLC;
-			chan->flags |= DAHDI_FLAG_NOSTDTXRX;
-			dahdi_chan_set_type_digital(chan);
-		} else {
-			chan->flags &= ~DAHDI_FLAG_NOSTDTXRX;
 		}
 
 		if ((ch.sigtype & DAHDI_SIG_MTP2) == DAHDI_SIG_MTP2)
