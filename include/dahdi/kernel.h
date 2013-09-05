@@ -442,7 +442,7 @@ struct dahdi_chan_analog {
 	struct dahdi_rbs_config rbs;
 
 	/*! Idle signalling if CAS signalling */
-	u16 idlebits;
+	s16 idlebits;
 
 	/* Pulse dial stuff */
 	s16	pdialcount;			/*!< pulse dial count */
