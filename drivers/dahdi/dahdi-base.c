@@ -2520,14 +2520,24 @@ static ssize_t dahdi_chan_write(struct file *file, const char __user *usrbuf,
 		return -EINVAL;
 
 	for (;;) {
-		struct dahdi_chan_analog *a = dahdi_chan_get_analog(chan);
 		spin_lock_irqsave(&chan->lock, flags);
-		if ((chan->curtone || a->pdialcount) && !is_pseudo_chan(chan)) {
-			chan->curtone = NULL;
-			chan->tonep = 0;
-			chan->dialing = 0;
-			chan->txdialbuf[0] = '\0';
-			a->pdialcount = 0;
+		if (!is_pseudo_chan(chan)) {
+			if (dahdi_chan_is_analog(chan)) {
+				struct dahdi_chan_analog *a;
+				a = dahdi_chan_get_analog(chan);
+				if (chan->curtone || a->pdialcount) {
+					chan->curtone = NULL;
+					chan->tonep = 0;
+					chan->dialing = 0;
+					chan->txdialbuf[0] = '\0';
+					a->pdialcount = 0;
+				}
+			} else if (chan->curtone) {
+				chan->curtone = NULL;
+				chan->tonep = 0;
+				chan->dialing = 0;
+				chan->txdialbuf[0] = '\0';
+			}
 		}
 		if (chan->eventinidx != chan->eventoutidx) {
 			spin_unlock_irqrestore(&chan->lock, flags);
