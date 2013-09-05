@@ -509,7 +509,7 @@ struct dahdi_chan {
 	struct dahdi_chan *nextslave;
 
 	/* Different types of channels do not need all the members. */
-	union {
+	struct {
 		struct dahdi_chan_analog a;
 		struct dahdi_chan_digital d;
 	} t;
