@@ -1837,6 +1837,7 @@ static int set_tone_zone(struct dahdi_chan *chan, int zone)
 		tone_zone_put(zone);
 	}
 	chan->curzone = z;
+	BUG_ON(sizeof(chan->t.a.ringcadence) != sizeof(z->ringcadence));
 	memcpy(chan->t.a.ringcadence, z->ringcadence, sizeof(chan->t.a.ringcadence));
 	spin_unlock_irqrestore(&chan->lock, flags);
 
@@ -2991,6 +2992,7 @@ static int initialize_channel(struct dahdi_chan *chan)
 	chan->flags &= ~DAHDI_FLAG_LINEAR;
 	if (chan->curzone) {
 		/* Take cadence from tone zone */
+		BUG_ON(sizeof(chan->t.a.ringcadence) != sizeof(chan->curzone->ringcadence));
 		memcpy(chan->t.a.ringcadence, chan->curzone->ringcadence, sizeof(chan->t.a.ringcadence));
 	} else {
 		/* Do a default */
