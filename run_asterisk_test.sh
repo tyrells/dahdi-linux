@@ -1,5 +1,5 @@
 #!/bin/bash
-asterisk -rx 'core stop now'
+asterisk -rx 'core stop now' > /dev/null 2>&1 
 set -e
 /etc/init.d/dahdi stop
 modprobe --first-time dahdi
