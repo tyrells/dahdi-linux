@@ -441,27 +441,30 @@ struct dahdi_sf_params {
 struct dahdi_chan_analog {
 	struct dahdi_rbs_config rbs;
 
-	/*! Ring cadence */
-	s16 ringcadence[DAHDI_MAX_CADENCE];
-
 	/*! Idle signalling if CAS signalling */
-	s16	idlebits;
+	s16 idlebits;
+
 	/* Pulse dial stuff */
 	s16	pdialcount;			/*!< pulse dial count */
-	s16	firstcadencepos;				/*!< Where to restart ring cadence */
+
+	/*! Ring cadence */
+	s16 ringcadence[DAHDI_MAX_CADENCE];
+	s16 firstcadencepos;				/*!< Where to restart ring cadence */
+
 	/*! RING debounce timer */
 	s16	ringdebtimer;
+	
 	/*! RING trailing detector to make sure a RING is really over */
-	s16	ringtrailer;
+	s16 ringtrailer;
 
 	/* PULSE digit receiver stuff */
 	s16	pulsecount;
 	s16	pulsetimer;
 
 	/* non-RBS rx state */
-	s16	rxhooksig;
-	s16	txhooksig;
-	s16	kewlonhook;
+	s16 rxhooksig;
+	s16 txhooksig;
+	s16 kewlonhook;
 };
 
 /* These are the parameters necesary for the channels supporting digital
