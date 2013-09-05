@@ -447,6 +447,7 @@ struct dahdi_chan_analog {
 	u16	rxhooksig:3;
 	u16	txhooksig:3;
 	u16	kewlonhook:1;
+	u16	gotgs:1;
 	u16	firstcadencepos:4;
 	u16	pulsecount:4;
 	u16	pdialcount:4;
@@ -599,7 +600,6 @@ struct dahdi_chan {
 	int 	otimer;
 	
 	/* RBS state */
-	int gotgs;
 	int txstate;
 	int rxsig;
 	int txsig;

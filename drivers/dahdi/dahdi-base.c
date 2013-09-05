@@ -1590,6 +1590,7 @@ static void close_channel(struct dahdi_chan *chan)
 		a->pdialcount = 0;
 		a->pulsetimer = 0;
 		a->ringdebtimer = 0;
+		a->gotgs = 0;
 	}
 	chan->txdialbuf[0] = '\0';
 	chan->digitmode = DIGIT_MODE_DTMF;
@@ -1607,7 +1608,6 @@ static void close_channel(struct dahdi_chan *chan)
 		chan->dacs_chan = NULL;
 
 	chan->confmute = 0;
-	chan->gotgs = 0;
 	reset_conf(chan);
 	chan->dacs_chan = NULL;
 
@@ -2984,6 +2984,7 @@ static int initialize_channel(struct dahdi_chan *chan)
 			a->ringcadence[0] = a->rbs.starttime;
 			a->ringcadence[1] = DAHDI_RINGOFFTIME;
 		}
+		a->gotgs = 0;
 	} else {
 		memset(&chan->_t, 0, sizeof(chan->_t));
 	}
@@ -3012,7 +3013,6 @@ static int initialize_channel(struct dahdi_chan *chan)
 	memset(chan->conflast1, 0, sizeof(chan->conflast1));
 	memset(chan->conflast2, 0, sizeof(chan->conflast2));
 	chan->confmute = 0;
-	chan->gotgs = 0;
 	chan->curtone = NULL;
 	chan->tonep = 0;
 	if (is_gain_allocated(chan))
@@ -8280,6 +8280,10 @@ out in the later versions, and is put back now. */
 
 static inline void rbs_itimer_expire(struct dahdi_chan *chan)
 {
+	struct dahdi_chan_analog *a;
+	if (!dahdi_chan_is_analog(chan))
+		return;
+	a = dahdi_chan_get_analog(chan);
 	/* the only way this could have gotten here, is if a channel
 	    went onf hook longer then the wink or flash detect timeout */
 	/* Called with chan->lock held */
@@ -8289,7 +8293,7 @@ static inline void rbs_itimer_expire(struct dahdi_chan *chan)
 	    case DAHDI_SIG_FXOGS:
 	    case DAHDI_SIG_FXOKS:
 		__qevent(chan,DAHDI_EVENT_ONHOOK);
-		chan->gotgs = 0;
+		a->gotgs = 0;
 		break;
 #if defined(EMFLASH) || defined(EMPULSE)
 	    case DAHDI_SIG_EM:
@@ -8414,7 +8418,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 			__qevent(chan,DAHDI_EVENT_ONHOOK);
 		}
 		chan->txstate = DAHDI_TXSTATE_ONHOOK;
-		chan->gotgs = 0;
+		a->gotgs = 0;
 		break;
 
 	case DAHDI_TXSTATE_PULSEBREAK:
@@ -8521,7 +8525,7 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 #else /* EMFLASH || EMPULSE */
 			else {
 				__qevent(chan,DAHDI_EVENT_ONHOOK);
-				chan->gotgs = 0;
+				a->gotgs = 0;
 			}
 #endif
 			chan->itimerset = chan->itimer = 0;
@@ -8553,7 +8557,7 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 			a->ringdebtimer = RING_DEBOUNCE_TIME;
 			a->ringtrailer = 0;
 			if (chan->txstate != DAHDI_TXSTATE_DEBOUNCE) {
-				chan->gotgs = 0;
+				a->gotgs = 0;
 				__qevent(chan,DAHDI_EVENT_ONHOOK);
 			}
 		}
@@ -8561,9 +8565,9 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 	   case DAHDI_SIG_FXOGS: /* FXO Groundstart */
 		if (rxsig == DAHDI_RXSIG_START) {
 			  /* if havent got gs, report it */
-			if (!chan->gotgs) {
+			if (!a->gotgs) {
 				__qevent(chan,DAHDI_EVENT_RINGOFFHOOK);
-				chan->gotgs = 1;
+				a->gotgs = 1;
 			}
 		}
 		/* fall through intentionally */
@@ -8596,9 +8600,9 @@ static void __dahdi_hooksig_pvt(struct dahdi_chan *chan, enum dahdi_rxsig rxsig)
 					__qevent(chan,DAHDI_EVENT_WINKFLASH);
 			} else {
 				  /* if havent got GS detect */
-				if (!chan->gotgs) {
+				if (!a->gotgs) {
 					__qevent(chan,DAHDI_EVENT_RINGOFFHOOK);
-					chan->gotgs = 1;
+					a->gotgs = 1;
 					chan->itimerset = chan->itimer = 0;
 				}
 			}
