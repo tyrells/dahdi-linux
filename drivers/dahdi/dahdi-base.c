@@ -6733,19 +6733,22 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 		}
 		break;
 	case DAHDI_HDLC_RATE:
-	{
-		struct dahdi_chan_digital *d = dahdi_chan_get_digital(chan);
-		get_user(j, (int __user *)data);
-		if (j == 56) {
-			chan->flags |= DAHDI_FLAG_HDLC56;
-		} else {
-			chan->flags &= ~DAHDI_FLAG_HDLC56;
-		}
+		if (dahdi_chan_is_digital(chan)) {
+			struct dahdi_chan_digital *d;
+			d = dahdi_chan_get_digital(chan);
+			get_user(j, (int __user *)data);
+			if (j == 56) {
+				chan->flags |= DAHDI_FLAG_HDLC56;
+			} else {
+				chan->flags &= ~DAHDI_FLAG_HDLC56;
+			}
 
-		fasthdlc_init(&d->rxhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
-		fasthdlc_init(&d->txhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
+			fasthdlc_init(&d->rxhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
+			fasthdlc_init(&d->txhdlc, (chan->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
+		} else {
+			return -EINVAL;
+		}
 		break;
-	}
 	case DAHDI_ECHOCANCEL_PARAMS:
 	{
 		struct dahdi_echocanparams ecp;
