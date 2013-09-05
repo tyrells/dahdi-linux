@@ -1768,17 +1768,19 @@ static int start_tone_digit(struct dahdi_chan *chan, int tone)
 
 static int start_tone(struct dahdi_chan *chan, int tone)
 {
-	struct dahdi_chan_analog *a;
 	int res = -EINVAL;
-	a = dahdi_chan_get_analog(chan);
 
 	/* Stop the current tone, no matter what */
 	chan->tonep = 0;
 	chan->curtone = NULL;
-	a->pdialcount = 0;
 	chan->txdialbuf[0] = '\0';
 	chan->dialing = 0;
 
+	if (dahdi_chan_is_analog(chan)) {
+		struct dahdi_chan_analog *a;
+		a = dahdi_chan_get_analog(chan);
+		a->pdialcount = 0;
+	}
 	if (tone == -1) {
 		/* Just stop the current tone */
 		res = 0;
