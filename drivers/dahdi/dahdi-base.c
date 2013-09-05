@@ -2838,7 +2838,6 @@ static int dahdi_cas_setbits(struct dahdi_chan *chan, int bits)
 static int dahdi_hangup(struct dahdi_chan *chan)
 {
 	int x, res = 0;
-	struct dahdi_chan_analog *a;
 
 	/* Can't hangup pseudo channels */
 	if (!chan->span)
@@ -2848,15 +2847,19 @@ static int dahdi_hangup(struct dahdi_chan *chan)
 	if (chan->flags & (DAHDI_FLAG_CLEAR | DAHDI_FLAG_NOSTDTXRX))
 		return -EINVAL;
 
-	a = dahdi_chan_get_analog(chan);
-	a->kewlonhook = 0;
 
 	if ((chan->sig == DAHDI_SIG_FXSLS) || (chan->sig == DAHDI_SIG_FXSKS) ||
 			(chan->sig == DAHDI_SIG_FXSGS)) {
+		struct dahdi_chan_analog *a;
+		a = dahdi_chan_get_analog(chan);
+		a->kewlonhook = 0;
 		a->ringdebtimer = RING_DEBOUNCE_TIME;
 	}
 
 	if (chan->span->flags & DAHDI_FLAG_RBS) {
+		struct dahdi_chan_analog *a;
+		a = dahdi_chan_get_analog(chan);
+		a->kewlonhook = 0;
 		if (chan->sig == DAHDI_SIG_CAS) {
 			dahdi_cas_setbits(chan, a->idlebits);
 		} else if ((chan->sig == DAHDI_SIG_FXOKS) && (chan->txstate != DAHDI_TXSTATE_ONHOOK)
@@ -2866,7 +2869,9 @@ static int dahdi_hangup(struct dahdi_chan *chan)
 			dahdi_rbs_sethook(chan, DAHDI_TXSIG_KEWL, DAHDI_TXSTATE_KEWL, DAHDI_KEWLTIME);
 		} else
 			dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_ONHOOK, 0);
-	} else {
+	} else if (dahdi_chan_is_digital(chan)) {
+		struct dahdi_chan_analog *a;
+		a = dahdi_chan_get_analog(chan);
 		/* Let the driver hang up the line if it wants to  */
 		if (chan->span->ops->sethook) {
 			if (a->txhooksig != DAHDI_ONHOOK) {
@@ -2902,6 +2907,8 @@ static int dahdi_hangup(struct dahdi_chan *chan)
 	chan->afterdialingtimer = 0;
 	chan->curtone = NULL;
 	if (dahdi_chan_is_analog(chan)) {
+		struct dahdi_chan_analog *a;
+		a = dahdi_chan_get_analog(chan);
 		a->pdialcount = 0;
 	}
 	chan->cadencepos = 0;
