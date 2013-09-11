@@ -15,7 +15,7 @@ set -e
 modprobe hdlc_cisco
 modprobe --first-time dahdi
 sleep 1
-dahdi_cfg -c /vagrant/dahdi_nethdlc.conf -vvf
+dahdi_cfg -c /vagrant/dahdi_nethdlc.conf
 /usr/src/dahdi-tools/sethdlc hdlc0 cisco
 /usr/src/dahdi-tools/sethdlc hdlc1 cisco
 /sbin/ifconfig hdlc0 192.168.0.1 pointopoint 192.168.0.2
