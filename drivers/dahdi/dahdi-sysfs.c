@@ -32,8 +32,15 @@
 #include "dahdi-sysfs.h"
 
 
-static char *initdir = "/usr/share/dahdi";
-module_param(initdir, charp, 0644);
+static char *initdir;
+module_param(initdir, charp, 0444);
+MODULE_PARM_DESC(initdir,
+		"deprecated, should use <tools_rootdir>/usr/share/dahdi");
+
+static char *tools_rootdir;
+module_param(tools_rootdir, charp, 0444);
+MODULE_PARM_DESC(tools_rootdir,
+		"root directory of all tools paths (default /)");
 
 static int span_match(struct device *dev, struct device_driver *driver)
 {
@@ -47,7 +54,9 @@ static inline struct dahdi_span *dev_to_span(struct device *dev)
 
 #define	SPAN_VAR_BLOCK	\
 	do {		\
-		DAHDI_ADD_UEVENT_VAR("DAHDI_INIT_DIR=%s", initdir);	\
+		DAHDI_ADD_UEVENT_VAR("DAHDI_TOOLS_ROOTDIR=%s", tools_rootdir); \
+		DAHDI_ADD_UEVENT_VAR("DAHDI_INIT_DIR=%s/%s", tools_rootdir,    \
+				initdir);	\
 		DAHDI_ADD_UEVENT_VAR("SPAN_NUM=%d", span->spanno);	\
 		DAHDI_ADD_UEVENT_VAR("SPAN_NAME=%s", span->name);	\
 	} while (0)
@@ -222,7 +231,30 @@ static struct device_attribute span_dev_attrs[] = {
 	__ATTR_NULL,
 };
 
+static ssize_t master_span_show(struct device_driver *driver, char *buf)
+{
+	struct dahdi_span *s = get_master_span();
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", (s) ? s->spanno : 0);
+}
+
+static ssize_t master_span_store(struct device_driver *driver, const char *buf,
+			  size_t count)
+{
+	int spanno;
+
+	if (sscanf(buf, "%d", &spanno) != 1) {
+		module_printk(KERN_ERR, "non-numeric input '%s'\n", buf);
+		return -EINVAL;
+	}
+	set_master_span(spanno);
+	return count;
+}
+
+
 static struct driver_attribute dahdi_attrs[] = {
+	__ATTR(master_span, S_IRUGO | S_IWUSR, master_span_show,
+			master_span_store),
 	__ATTR_NULL,
 };
 
@@ -296,6 +328,7 @@ void span_sysfs_remove(struct dahdi_span *span)
 
 	get_device(span_device);
 	span_uevent_send(span, KOBJ_OFFLINE);
+	sysfs_remove_link(&span_device->kobj, "ddev");
 	device_unregister(span->span_device);
 	dev_set_drvdata(span_device, NULL);
 	span_device->parent = NULL;
@@ -336,6 +369,15 @@ int span_sysfs_create(struct dahdi_span *span)
 		span->span_device = NULL;
 		goto cleanup;
 	}
+	res = sysfs_create_link(&span_device->kobj, &span_device->parent->kobj,
+			"ddev");
+	if (res) {
+		span_err(span, "%s: sysfs_create_link failed: %d\n", __func__,
+				res);
+		kfree(span->span_device);
+		span->span_device = NULL;
+		goto cleanup;
+	}
 
 	for (x = 0; x < span->channels; x++) {
 		res = chan_sysfs_create(span->chans[x]);
@@ -361,6 +403,71 @@ static inline struct dahdi_device *to_ddev(struct device *dev)
 {
 	return container_of(dev, struct dahdi_device, dev);
 }
+
+#define	DEVICE_VAR_BLOCK	\
+	do {		\
+		DAHDI_ADD_UEVENT_VAR("DAHDI_TOOLS_ROOTDIR=%s", tools_rootdir); \
+		DAHDI_ADD_UEVENT_VAR("DAHDI_INIT_DIR=%s/%s", tools_rootdir,    \
+				initdir);				\
+		DAHDI_ADD_UEVENT_VAR("DAHDI_DEVICE_HWID=%s",		\
+				ddev->hardware_id);			\
+		DAHDI_ADD_UEVENT_VAR("DAHDI_DEVICE_LOCATION=%s",	\
+				ddev->location);			\
+	} while (0)
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 24)
+#define DAHDI_ADD_UEVENT_VAR(fmt, val...)			\
+	do {							\
+		int err = add_uevent_var(envp, num_envp, &i,	\
+				buffer, buffer_size, &len,	\
+				fmt, val);			\
+		if (err)					\
+			return err;				\
+	} while (0)
+
+static int device_uevent(struct device *dev, char **envp, int num_envp,
+		char *buffer, int buffer_size)
+{
+	struct dahdi_device	*ddev;
+	int			i = 0;
+	int			len = 0;
+
+	if (!dev)
+		return -ENODEV;
+
+	ddev = to_ddev(dev);
+	if (!ddev)
+		return -ENODEV;
+
+	dahdi_dbg(GENERAL, "SYFS dev_name=%s\n", dev_name(dev));
+	DEVICE_VAR_BLOCK;
+	envp[i] = NULL;
+	return 0;
+}
+
+#else
+#define DAHDI_ADD_UEVENT_VAR(fmt, val...)			\
+	do {							\
+		int err = add_uevent_var(kenv, fmt, val);	\
+		if (err)					\
+			return err;				\
+	} while (0)
+
+static int device_uevent(struct device *dev, struct kobj_uevent_env *kenv)
+{
+	struct dahdi_device *ddev;
+
+	if (!dev)
+		return -ENODEV;
+	ddev = to_ddev(dev);
+	if (!ddev)
+		return -ENODEV;
+	dahdi_dbg(GENERAL, "SYFS dev_name=%s\n", dev_name(dev));
+	DEVICE_VAR_BLOCK;
+	return 0;
+}
+
+#endif
 
 static ssize_t
 dahdi_device_manufacturer_show(struct device *dev,
@@ -400,6 +507,16 @@ dahdi_device_hardware_id_show(struct device *dev,
 
 	return sprintf(buf, "%s\n",
 		(ddev->hardware_id) ? ddev->hardware_id : "");
+}
+
+static ssize_t
+dahdi_device_location_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct dahdi_device *ddev = to_ddev(dev);
+
+	return sprintf(buf, "%s\n",
+		(ddev->location) ? ddev->location : "");
 }
 
 static ssize_t
@@ -549,6 +666,7 @@ static struct device_attribute dahdi_device_attrs[] = {
 	__ATTR(type, S_IRUGO, dahdi_device_type_show, NULL),
 	__ATTR(span_count, S_IRUGO, dahdi_device_span_count_show, NULL),
 	__ATTR(hardware_id, S_IRUGO, dahdi_device_hardware_id_show, NULL),
+	__ATTR(location, S_IRUGO, dahdi_device_location_show, NULL),
 	__ATTR(auto_assign, S_IWUSR, NULL, dahdi_device_auto_assign),
 	__ATTR(assign_span, S_IWUSR, NULL, dahdi_device_assign_span),
 	__ATTR(unassign_span, S_IWUSR, NULL, dahdi_device_unassign_span),
@@ -559,6 +677,7 @@ static struct device_attribute dahdi_device_attrs[] = {
 
 static struct bus_type dahdi_device_bus = {
 	.name = "dahdi_devices",
+	.uevent         = device_uevent,
 	.dev_attrs = dahdi_device_attrs,
 };
 
@@ -639,6 +758,19 @@ int __init dahdi_sysfs_init(const struct file_operations *dahdi_fops)
 	int res = 0;
 
 	dahdi_dbg(DEVICES, "Registering DAHDI device bus\n");
+
+	/* Handle dahdi-tools paths (for udev environment) */
+	if (tools_rootdir && initdir) {
+		dahdi_err("Cannot use tools-rootdir and initdir parameters simultaneously\n");
+		return -EINVAL;
+	}
+	if (initdir)
+		pr_notice("dahdi: initdir is depracated -- prefer using \"tools_rootdir\" parameter\n");
+	else
+		initdir = "/usr/share/dahdi";
+	if (!tools_rootdir)
+		tools_rootdir = "";
+
 	res = bus_register(&dahdi_device_bus);
 	if (res)
 		return res;
