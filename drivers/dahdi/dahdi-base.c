@@ -4297,7 +4297,8 @@ static int dahdi_ioctl_getparams(struct file *file, unsigned long data)
 	}
 
 	if (chan->span &&
-	    chan->span->ops->rbsbits && !(chan->sig & DAHDI_SIG_CLEAR)) {
+	    chan->span->ops->rbsbits && !(chan->sig & DAHDI_SIG_CLEAR) &&
+	    dahdi_chan_is_analog(chan)) {
 		param.rxbits = chan->rxsig;
 		param.txbits = chan->txsig;
 		param.idlebits = dahdi_chan_get_analog(chan)->idlebits;
@@ -4308,7 +4309,8 @@ static int dahdi_ioctl_getparams(struct file *file, unsigned long data)
 	}
 	if (chan->span &&
 	    (chan->span->ops->rbsbits || chan->span->ops->hooksig) &&
-	    !(chan->sig & DAHDI_SIG_CLEAR)) {
+	    !(chan->sig & DAHDI_SIG_CLEAR)  &&
+	    dahdi_chan_is_analog(chan)) {
 		struct dahdi_chan_analog *a = dahdi_chan_get_analog(chan);
 		param.rxhooksig = a->rxhooksig;
 		param.txhooksig = a->txhooksig;
