@@ -3083,8 +3083,13 @@ static void handle_falc_int(struct t43x *wc, int unit)
 		ts->span.count.be += __t43x_framer_get(wc, fidx, BECL_T);
 		ts->span.count.prbs = __t43x_framer_get(wc, fidx, FRS1_T);
 
-		if (DAHDI_RXSIG_INITIAL == ts->span.chans[0]->rxhooksig)
-			recheck_sigbits = true;
+		if (dahdi_chan_is_analog(ts->span.chans[0])) {
+			struct dahdi_chan *const c = ts->span.chans[0];
+			struct dahdi_chan_analog *a = dahdi_chan_get_analog(c);
+			if (DAHDI_RXSIG_INITIAL == a->rxhooksig) {
+				recheck_sigbits = true;
+			}
+		}
 	}
 	spin_unlock(&wc->reglock);
 

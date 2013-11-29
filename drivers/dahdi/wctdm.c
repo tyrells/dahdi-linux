@@ -782,6 +782,8 @@ static inline void wctdm_voicedaa_check_hook(struct wctdm *wc, int card)
 	signed char b;
 	int errors = 0;
 	struct fxo *fxo = &wc->mod[card].fxo;
+	struct dahdi_chan *const c = wc->chans[card];
+	struct dahdi_chan_analog *const a = dahdi_chan_get_analog(c);
 
 	/* Try to track issues that plague slot one FXO's */
 	b = wc->reg0shadow[card];
@@ -865,7 +867,7 @@ static inline void wctdm_voicedaa_check_hook(struct wctdm *wc, int card)
 		}
 	}
 
-	if (unlikely(DAHDI_RXSIG_INITIAL == wc->chans[card]->rxhooksig)) {
+	if (unlikely(DAHDI_RXSIG_INITIAL == a->rxhooksig)) {
 		/*
 		 * dahdi-base will set DAHDI_RXSIG_INITIAL after a
 		 * DAHDI_STARTUP or DAHDI_CHANCONFIG ioctl so that new events

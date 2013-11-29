@@ -1709,6 +1709,8 @@ wcaxx_voicedaa_check_hook(struct wcaxx *wc, struct wcaxx_module *const mod)
 	signed char b;
 	u8 abs_voltage;
 	struct fxo *const fxo = &mod->mod.fxo;
+	struct dahdi_chan *const c = get_dahdi_chan(wc, mod);
+	struct dahdi_chan_analog *const a = dahdi_chan_get_analog(c);
 
 	/* Try to track issues that plague slot one FXO's */
 	b = fxo->hook_ring_shadow & 0x9b;
@@ -1733,8 +1735,7 @@ wcaxx_voicedaa_check_hook(struct wcaxx *wc, struct wcaxx_module *const mod)
 			 mod->card + 1, fxo->line_voltage_status);
 	}
 
-	if (unlikely(DAHDI_RXSIG_INITIAL ==
-				get_dahdi_chan(wc, mod)->rxhooksig)) {
+	if (unlikely(DAHDI_RXSIG_INITIAL == a->rxhooksig)) {
 		/*
 		 * dahdi-base will set DAHDI_RXSIG_INITIAL after a
 		 * DAHDI_STARTUP or DAHDI_CHANCONFIG ioctl so that new events

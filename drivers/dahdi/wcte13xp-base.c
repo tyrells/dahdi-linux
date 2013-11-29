@@ -2302,7 +2302,7 @@ static void handle_falc_int(struct t13x *wc)
 		wc->span.count.be += __t13x_framer_get(wc, BECL_T);
 		wc->span.count.prbs = __t13x_framer_get(wc, FRS1_T);
 
-		if (DAHDI_RXSIG_INITIAL == wc->span.chans[0]->rxhooksig)
+		if (DAHDI_RXSIG_INITIAL == dahdi_chan_get_analog(wc->span.chans[0])->rxhooksig)
 			recheck_sigbits = true;
 	}
 	spin_unlock_irqrestore(&wc->reglock, flags);
