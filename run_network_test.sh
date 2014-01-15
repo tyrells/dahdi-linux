@@ -13,7 +13,7 @@ set -e
 
 /etc/init.d/dahdi stop
 modprobe hdlc_cisco
-modprobe --first-time dahdi
+modprobe --first-time dahdi auto_assign_spans=1
 sleep 1
 dahdi_cfg -c /vagrant/dahdi_nethdlc.conf
 /usr/src/dahdi-tools/sethdlc hdlc0 cisco
