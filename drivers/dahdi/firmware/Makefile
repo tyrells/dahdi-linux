@@ -68,7 +68,7 @@ FIRMWARE:=$(FIRMWARE:FIRMWARE-A8B=dahdi-fw-a8a-$(A8A_VERSION).tar.gz)
 FIRMWARE:=$(FIRMWARE:FIRMWARE-A4A=dahdi-fw-a4b-$(A4B_VERSION).tar.gz)
 FIRMWARE:=$(FIRMWARE:FIRMWARE-A4B=dahdi-fw-a4a-$(A4A_VERSION).tar.gz)
 
-FWLOADERS:=dahdi-fwload-vpmadt032-$(VPMADT032_VERSION).tar.gz
+#FWLOADERS:=dahdi-fwload-vpmadt032-$(VPMADT032_VERSION).tar.gz
 
 # Build a list of object files if hotplug will not be used
 OBJECT_FILES:=$(ALL_FIRMWARE:FIRMWARE-OCT6114-032=dahdi-fw-oct6114-032.o)
