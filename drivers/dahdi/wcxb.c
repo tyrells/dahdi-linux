@@ -122,10 +122,14 @@ struct wcxb_meta_desc {
 
 static inline bool wcxb_is_pcie(const struct wcxb *xb)
 {
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 33)
+	return pci_is_pcie(xb->pdev);
+#else
 #ifndef WCXB_PCI_DEV_DOES_NOT_HAVE_IS_PCIE
 	return (xb->pdev->is_pcie > 0);
 #else
 	return (xb->flags.is_pcie > 0);
+#endif
 #endif
 }
 
@@ -397,16 +401,22 @@ static irqreturn_t _wcxb_isr(int irq, void *dev_id)
 			spin_lock(&xb->lock);
 
 			if (!xb->flags.latency_locked) {
-				xb->latency++;
-
+				xb->latency = min(xb->latency + 1,
+						  xb->max_latency);
 #ifdef HAVE_RATELIMIT
 				if (__ratelimit(&_underrun_rl)) {
 #else
 				if (printk_ratelimit()) {
 #endif
-					dev_info(&xb->pdev->dev,
-						 "Underrun detected by hardware. Latency bumped to: %dms\n",
-						 xb->latency);
+					if (xb->latency != xb->max_latency) {
+						dev_info(&xb->pdev->dev,
+							 "Underrun detected by hardware. Latency bumped to: %dms\n",
+							 xb->latency);
+					} else {
+						dev_info(&xb->pdev->dev,
+							 "Underrun detected by hardware. Latency at max of %dms.\n",
+							 xb->latency);
+					}
 				}
 			}
 
@@ -598,6 +608,8 @@ int wcxb_init(struct wcxb *xb, const char *board_name, u32 int_mode)
 		return -EINVAL;
 
 	xb->latency = WCXB_DEFAULT_LATENCY;
+	xb->max_latency = WCXB_DEFAULT_MAXLATENCY;
+
 	spin_lock_init(&xb->lock);
 
 	xb->membase = pci_iomap(pdev, 0, 0);

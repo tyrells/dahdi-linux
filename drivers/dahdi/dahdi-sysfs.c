@@ -251,19 +251,31 @@ static ssize_t master_span_store(struct device_driver *driver, const char *buf,
 	return count;
 }
 
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 13, 0)
 static struct driver_attribute dahdi_attrs[] = {
 	__ATTR(master_span, S_IRUGO | S_IWUSR, master_span_show,
 			master_span_store),
 	__ATTR_NULL,
 };
+#else
+static DRIVER_ATTR_RW(master_span);
+static struct attribute *dahdi_attrs[] = {
+	&driver_attr_master_span.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(dahdi);
+#endif
 
 static struct bus_type spans_bus_type = {
 	.name           = "dahdi_spans",
 	.match          = span_match,
 	.uevent         = span_uevent,
 	.dev_attrs	= span_dev_attrs,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 13, 0)
 	.drv_attrs	= dahdi_attrs,
+#else
+	.drv_groups 	= dahdi_groups,
+#endif
 };
 
 static int span_probe(struct device *dev)
@@ -617,7 +629,8 @@ dahdi_spantype_store(struct device *dev, struct device_attribute *attr,
 {
 	struct dahdi_device *const ddev = to_ddev(dev);
 	int ret;
-	struct dahdi_span *span;
+	struct dahdi_span *span = NULL;
+	struct dahdi_span *cur;
 	unsigned int local_span_number;
 	char spantype_name[80];
 	enum spantypes spantype;
@@ -633,9 +646,18 @@ dahdi_spantype_store(struct device *dev, struct device_attribute *attr,
 		return -EINVAL;
 	}
 
-	list_for_each_entry(span, &ddev->spans, device_node) {
-		if (local_spanno(span) == local_span_number)
+	list_for_each_entry(cur, &ddev->spans, device_node) {
+		if (local_spanno(cur) == local_span_number) {
+			span = cur;
 			break;
+		}
+	}
+
+	if (!span || (local_spanno(span) != local_span_number)) {
+		module_printk(KERN_WARNING,
+				"%d is not a valid local span number "
+				"for this device.\n", local_span_number);
+		return -EINVAL;
 	}
 
 	if (test_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags)) {
@@ -644,12 +666,6 @@ dahdi_spantype_store(struct device *dev, struct device_attribute *attr,
 		return -EINVAL;
 	}
 
-	if (local_spanno(span) != local_span_number) {
-		module_printk(KERN_WARNING,
-				"%d is not a valid local span number "
-				"for this device.\n", local_span_number);
-		return -EINVAL;
-	}
 
 	if (!span->ops->set_spantype) {
 		module_printk(KERN_WARNING, "Span %s does not support "

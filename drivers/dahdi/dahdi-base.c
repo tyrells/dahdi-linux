@@ -7304,13 +7304,6 @@ static void __dahdi_init_span(struct dahdi_span *span)
 	spin_lock_init(&span->lock);
 	clear_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags);
 
-	/* DAHDI_ALARM_NOTOPEN can be set when a span is disabled, i.e. via
-	 * sysfs, so when the span is being initialized again before
-	 * reassignment we should make sure it's cleared. This eliminates the
-	 * need for board drivers to re-report their alarm states on span
-	 * reassignment. */
-	span->alarms &= ~DAHDI_ALARM_NOTOPEN;
-
 	if (!span->deflaw) {
 		module_printk(KERN_NOTICE, "Span %s didn't specify default "
 			      "law. Assuming mulaw, please fix driver!\n",
@@ -7371,6 +7364,7 @@ static int _dahdi_assign_span(struct dahdi_span *span, unsigned int spanno,
 {
 	int res = 0;
 	unsigned int x;
+	unsigned long flags;
 
 	if (!span || !span->ops || !span->ops->owner)
 		return -EFAULT;
@@ -7381,6 +7375,16 @@ static int _dahdi_assign_span(struct dahdi_span *span, unsigned int spanno,
 			 local_spanno(span), span->spanno);
 		return -EINVAL;
 	}
+
+	/* DAHDI_ALARM_NOTOPEN can be set when a span is disabled, i.e. via
+	 * sysfs, so when the span is being reassigned we should make sure it's
+	 * cleared. This eliminates the need for board drivers to re-report
+	 * their alarm states on span reassignment. */
+
+	spin_lock_irqsave(&span->lock, flags);
+	span->alarms &= ~DAHDI_ALARM_NOTOPEN;
+	dahdi_alarm_notify(span);
+	spin_unlock_irqrestore(&span->lock, flags);
 
 	if (span->ops->enable_hw_preechocan ||
 	    span->ops->disable_hw_preechocan) {
@@ -7485,7 +7489,7 @@ int dahdi_assign_device_spans(struct dahdi_device *ddev)
 	return 0;
 }
 
-static int auto_assign_spans = 1;
+static int auto_assign_spans;
 static const char *UNKNOWN = "";
 
 /**

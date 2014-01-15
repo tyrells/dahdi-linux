@@ -1456,12 +1456,24 @@ static inline short dahdi_txtone_nextsample(struct dahdi_sf_params *sf)
 #define DAHDI_FORMAT_AUDIO_MASK	((1 << 16) - 1)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 10, 0)
+#ifdef RHEL_RELEASE_VERSION
+#if RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(6, 5)
 #ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>
 static inline void *PDE_DATA(const struct inode *inode)
 {
 	return PDE(inode)->data;
 }
+#endif
+#endif
+#else
+#ifdef CONFIG_PROC_FS
+#include <linux/proc_fs.h>
+static inline void *PDE_DATA(const struct inode *inode)
+{
+	return PDE(inode)->data;
+}
+#endif
 #endif
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 31)
 #define KERN_CONT ""
