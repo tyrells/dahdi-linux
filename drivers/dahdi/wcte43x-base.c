@@ -3536,6 +3536,7 @@ static void __devexit t43x_remove_one(struct pci_dev *pdev)
 
 static DEFINE_PCI_DEVICE_TABLE(t43x_pci_tbl) = {
 	{ 0xd161, 0x800e, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{ 0xd161, 0x8013, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ 0 }
 };
 
