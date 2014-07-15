@@ -30,6 +30,7 @@
 #include <linux/workqueue.h>
 #include <linux/device.h>
 #include <linux/delay.h>	/* for msleep() to debug */
+#include <linux/sched.h>
 #include "xpd.h"
 #include "xpp_dahdi.h"
 #include "xbus-core.h"
@@ -54,10 +55,19 @@ static ssize_t sync_store(struct device_driver *driver, const char *buf,
 	return exec_sync_command(buf, count);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 13, 0)
 static struct driver_attribute xpp_attrs[] = {
 	__ATTR(sync, S_IRUGO | S_IWUSR, sync_show, sync_store),
 	__ATTR_NULL,
 };
+#else
+static DRIVER_ATTR_RW(sync);
+static struct attribute *xpp_attrs[] = {
+	&driver_attr_sync.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(xpp);
+#endif
 
 /*--------- Sysfs Bus handling ----*/
 static DEVICE_ATTR_READER(xbus_state_show, dev, buf)
@@ -293,6 +303,42 @@ field##_show(struct device *dev, struct device_attribute *attr, char *buf) \
 xbus_attr(connector, "%s\n");
 xbus_attr(label, "%s\n");
 
+static DEVICE_ATTR_WRITER(dahdi_registration_store, dev, buf, count)
+{
+	xbus_t *xbus;
+	int dahdi_reg;
+	int ret;
+
+	xbus = dev_to_xbus(dev);
+	if (!xbus)
+		return -ENODEV;
+	ret = sscanf(buf, "%d", &dahdi_reg);
+	if (ret != 1)
+		return -EINVAL;
+	if (dahdi_reg) {
+		ret = xbus_register_dahdi_device(xbus);
+		if (ret < 0) {
+			XBUS_ERR(xbus,
+				"xbus_register_dahdi_device() failed (ret = %d)\n",
+				ret);
+			return ret;
+		}
+	} else {
+		xbus_unregister_dahdi_device(xbus);
+	}
+	return count;
+}
+
+static DEVICE_ATTR_READER(dahdi_registration_show, dev, buf)
+{
+	xbus_t *xbus;
+	int len;
+
+	xbus = dev_to_xbus(dev);
+	len = sprintf(buf, "%d\n", xbus_is_registered(xbus));
+	return len;
+}
+
 static struct device_attribute xbus_dev_attrs[] = {
 	__ATTR_RO(connector),
 	__ATTR_RO(label),
@@ -307,6 +353,9 @@ static struct device_attribute xbus_dev_attrs[] = {
 #ifdef	SAMPLE_TICKS
 	__ATTR(samples, S_IWUSR | S_IRUGO, samples_show, samples_store),
 #endif
+	__ATTR(dahdi_registration, S_IRUGO | S_IWUSR,
+		dahdi_registration_show,
+		dahdi_registration_store),
 	__ATTR_NULL,
 };
 
@@ -409,7 +458,11 @@ static struct bus_type toplevel_bus_type = {
 	.match = astribank_match,
 	.uevent = astribank_uevent,
 	.dev_attrs = xbus_dev_attrs,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 13, 0)
 	.drv_attrs = xpp_attrs,
+#else
+	.drv_groups = xpp_groups,
+#endif
 };
 
 static int astribank_probe(struct device *dev)
@@ -601,25 +654,12 @@ static DEVICE_ATTR_WRITER(span_store, dev, buf, count)
 		return -EINVAL;
 	if (!XBUS_IS(xpd->xbus, READY))
 		return -ENODEV;
-	XPD_DBG(DEVICES, xpd, "%s -- deprecated (should use pinned-spans)\n",
+	XPD_DBG(DEVICES, xpd, "%s -- deprecated (should use assigned-spans)\n",
 		(dahdi_reg) ? "register" : "unregister");
-	if (xbus_is_registered(xpd->xbus)) {
-		if (dahdi_reg) {
-			XPD_DBG(DEVICES, xpd,
-				"already registered %s. Ignored.\n",
-				xpd->xbus->busname);
-		} else {
-			xbus_unregister_dahdi_device(xpd->xbus);
-		}
-	} else {
-		if (!dahdi_reg) {
-			XPD_DBG(DEVICES, xpd,
-				"already unregistered %s. Ignored.\n",
-				xpd->xbus->busname);
-		} else {
-			xbus_register_dahdi_device(xpd->xbus);
-		}
-	}
+	if (dahdi_reg)
+		xbus_register_dahdi_device(xpd->xbus);
+	  else
+		xbus_unregister_dahdi_device(xpd->xbus);
 	return count;
 }
 
@@ -928,10 +968,13 @@ void xbus_sysfs_remove(xbus_t *xbus)
 	struct device *astribank;
 
 	BUG_ON(!xbus);
-	XBUS_DBG(DEVICES, xbus, "\n");
 	astribank = &xbus->astribank;
-	if (!dev_get_drvdata(astribank))
+	if (!dev_get_drvdata(astribank)) {
+		XBUS_NOTICE(xbus, "%s: already removed\n", __func__);
 		return;
+	}
+	XBUS_DBG(DEVICES, xbus, "going to unregister: refcount=%d\n",
+		atomic_read(&astribank->kobj.kref.refcount));
 	BUG_ON(dev_get_drvdata(astribank) != xbus);
 	device_unregister(astribank);
 	dev_set_drvdata(astribank, NULL);

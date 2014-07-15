@@ -50,6 +50,8 @@
 #include <linux/list.h>
 #include <linux/delay.h>
 #include <linux/mutex.h>
+#include <linux/ktime.h>
+#include <linux/slab.h>
 
 #if defined(HAVE_UNLOCKED_IOCTL) && defined(CONFIG_BKL)
 #include <linux/smp_lock.h>
@@ -173,7 +175,7 @@ static sumtype *conf_sums_next;
 static sumtype *conf_sums;
 static sumtype *conf_sums_prev;
 
-static struct dahdi_span *master;
+static struct dahdi_span *master_span;
 struct file_operations *dahdi_transcode_fops = NULL;
 
 
@@ -611,7 +613,7 @@ void dahdi_unregister_echocan_factory(const struct dahdi_echocan_factory *ec)
 /* Is this span our syncronization master? */
 int dahdi_is_sync_master(const struct dahdi_span *span)
 {
-	return span == master;
+	return span == master_span;
 }
 
 static inline void rotate_sums(void)
@@ -732,6 +734,8 @@ enum spantypes dahdi_str2spantype(const char *name)
 		return SPANTYPE_DIGITAL_BRI_TE;
 	else if (strcasecmp("BRI_SOFT", name) == 0)
 		return SPANTYPE_DIGITAL_BRI_SOFT;
+	else if (strcasecmp("DYNAMIC", name) == 0)
+		return SPANTYPE_DIGITAL_DYNAMIC;
 	else
 		return SPANTYPE_INVALID;
 }
@@ -749,6 +753,7 @@ const char *dahdi_spantype2str(enum spantypes st)
 	case SPANTYPE_DIGITAL_BRI_NT:	return "BRI_NT";
 	case SPANTYPE_DIGITAL_BRI_TE:	return "BRI_TE";
 	case SPANTYPE_DIGITAL_BRI_SOFT:	return "BRI_SOFT";
+	case SPANTYPE_DIGITAL_DYNAMIC:	return "DYNAMIC";
 	default:
 	case SPANTYPE_INVALID:		return "INVALID";
 	};
@@ -787,6 +792,7 @@ ssize_t lineconfig_str(int lineconfig, char buf[], size_t size)
 	int crc4_bit = 0;
 	int len = 0;
 	int bit;
+	bool written = false;
 
 	for (bit = 4; bit <= 12; bit++) {
 		int mask = (1 << bit);
@@ -798,8 +804,10 @@ ssize_t lineconfig_str(int lineconfig, char buf[], size_t size)
 			case DAHDI_CONFIG_AMI:
 			case DAHDI_CONFIG_HDB3:
 				framing_bit = bit;
-				len += snprintf(buf + len, size, "%s/",
+				len += snprintf(buf + len, size, "%s%s",
+					(written) ? "/" : "",
 					dahdi_lineconfig_bit_name(bit));
+				written = true;
 			}
 		}
 		if (!coding_bit) {
@@ -808,14 +816,18 @@ ssize_t lineconfig_str(int lineconfig, char buf[], size_t size)
 			case DAHDI_CONFIG_D4:
 			case DAHDI_CONFIG_CCS:
 				coding_bit = bit;
-				len += snprintf(buf + len, size, "%s",
+				len += snprintf(buf + len, size, "%s%s",
+					(written) ? "/" : "",
 					dahdi_lineconfig_bit_name(bit));
+				written = true;
 			}
 		}
 		if (!crc4_bit && mask == DAHDI_CONFIG_CRC4) {
 				crc4_bit = bit;
-				len += snprintf(buf + len, size, "/%s",
+				len += snprintf(buf + len, size, "%s%s",
+					(written) ? "/" : "",
 					dahdi_lineconfig_bit_name(bit));
+				written = true;
 		}
 	}
 	return len;
@@ -979,10 +991,13 @@ static int dahdi_seq_show(struct seq_file *sfile, void *data)
 
 		seq_fill_alarm_string(sfile, chan->chan_alarms);
 
-		if (chan->ec_factory)
+		mutex_lock(&chan->mutex);
+		if (chan->ec_factory) {
 			seq_printf(sfile, "(EC: %s - %s) ",
 					chan->ec_factory->get_name(chan),
 					chan->ec_state ? "ACTIVE" : "INACTIVE");
+		}
+		mutex_unlock(&chan->mutex);
 
 		seq_printf(sfile, "\n");
 	}
@@ -1477,14 +1492,13 @@ static const struct dahdi_echocan_factory hwec_factory = {
 static int dahdi_enable_hw_preechocan(struct dahdi_chan *chan)
 {
 	int res;
-	unsigned long flags;
 
-	spin_lock_irqsave(&chan->lock, flags);
+	mutex_lock(&chan->mutex);
 	if (chan->ec_factory != &hwec_factory)
 		res = -ENODEV;
 	else
 		res = 0;
-	spin_unlock_irqrestore(&chan->lock, flags);
+	mutex_unlock(&chan->mutex);
 
 	if (-ENODEV == res)
 		return 0;
@@ -1797,6 +1811,17 @@ static int start_tone(struct dahdi_chan *chan, int tone)
 	return res;
 }
 
+/**
+ * stop_tone - Stops any tones on a channel.
+ *
+ * Must be called with chan->lock held.
+ *
+ */
+static inline int stop_tone(struct dahdi_chan *chan)
+{
+	return start_tone(chan, -1);
+}
+
 static int set_tone_zone(struct dahdi_chan *chan, int zone)
 {
 	int res = 0;
@@ -1824,6 +1849,9 @@ static int set_tone_zone(struct dahdi_chan *chan, int zone)
 		return -ENODATA;
 
 	spin_lock_irqsave(&chan->lock, flags);
+
+	stop_tone(chan);
+
 	if (chan->curzone) {
 		struct dahdi_zone *zone = chan->curzone;
 		chan->curzone = NULL;
@@ -1872,6 +1900,7 @@ static void __dahdi_init_chan(struct dahdi_chan *chan)
 	might_sleep();
 
 	spin_lock_init(&chan->lock);
+	mutex_init(&chan->mutex);
 	init_waitqueue_head(&chan->waitq);
 	if (!chan->master)
 		chan->master = chan;
@@ -1964,7 +1993,6 @@ static int dahdi_net_open(struct net_device *dev)
 		return -EINVAL;
 	}
 	ms->txbufpolicy = DAHDI_POLICY_IMMEDIATE;
-	ms->rxbufpolicy = DAHDI_POLICY_IMMEDIATE;
 
 	res = dahdi_reallocbufs(ms, DAHDI_DEFAULT_MTU_MRU, DAHDI_DEFAULT_NUM_BUFS);
 	if (res)
@@ -2291,10 +2319,10 @@ static void dahdi_chan_unreg(struct dahdi_chan *chan)
 		 */
 	}
 
-	spin_lock_irqsave(&chan->lock, flags);
+	mutex_lock(&chan->mutex);
 	release_echocan(chan->ec_factory);
 	chan->ec_factory = NULL;
-	spin_unlock_irqrestore(&chan->lock, flags);
+	mutex_unlock(&chan->mutex);
 
 #ifdef CONFIG_DAHDI_NET
 	if (dahdi_have_netdev(chan)) {
@@ -3043,57 +3071,64 @@ static const struct file_operations dahdi_chan_fops;
 
 static int dahdi_specchan_open(struct file *file)
 {
-	int res = 0;
+	int res = -ENXIO;
 	struct dahdi_chan *const chan = chan_from_file(file);
 
-	if (chan && chan->sig) {
-		/* Make sure we're not already open, a net device, or a slave device */
-		if (dahdi_have_netdev(chan))
-			res = -EBUSY;
-		else if (chan->master != chan)
-			res = -EBUSY;
-		else if ((chan->sig & __DAHDI_SIG_DACS) == __DAHDI_SIG_DACS)
-			res = -EBUSY;
-		else if (!test_and_set_bit(DAHDI_FLAGBIT_OPEN, &chan->flags)) {
-			unsigned long flags;
-			res = initialize_channel(chan);
-			if (res) {
-				/* Reallocbufs must have failed */
-				clear_bit(DAHDI_FLAGBIT_OPEN, &chan->flags);
-				return res;
-			}
-			spin_lock_irqsave(&chan->lock, flags);
-			if (is_pseudo_chan(chan))
-				chan->flags |= DAHDI_FLAG_AUDIO;
-			if (chan->span) {
-				const struct dahdi_span_ops *const ops =
-								chan->span->ops;
-				if (!try_module_get(ops->owner)) {
-					res = -ENXIO;
-				} else if (ops->open) {
-					res = ops->open(chan);
-					if (res)
-						module_put(ops->owner);
-				}
-			}
-			if (!res) {
-				chan->file = file;
-				file->private_data = chan;
-				/* Since we know we're a channel now, we can
-				 * update the f_op pointer and bypass a few of
-				 * the checks on the minor number. */
-				file->f_op = &dahdi_chan_fops;
-				spin_unlock_irqrestore(&chan->lock, flags);
-			} else {
-				spin_unlock_irqrestore(&chan->lock, flags);
-				close_channel(chan);
-				clear_bit(DAHDI_FLAGBIT_OPEN, &chan->flags);
-			}
-		} else {
-			res = -EBUSY;
+	if (!chan || !chan->sig)
+		return -ENXIO;
+
+	/* Make sure we're not already open, a net device, or a slave
+	 * device */
+	if (dahdi_have_netdev(chan))
+		res = -EBUSY;
+	else if (chan->master != chan)
+		res = -EBUSY;
+	else if ((chan->sig & __DAHDI_SIG_DACS) == __DAHDI_SIG_DACS)
+		res = -EBUSY;
+	else if (!test_and_set_bit(DAHDI_FLAGBIT_OPEN, &chan->flags)) {
+		unsigned long flags;
+		const struct dahdi_span_ops *const ops =
+		       (!is_pseudo_chan(chan)) ? chan->span->ops : NULL;
+
+		if (ops && !try_module_get(ops->owner)) {
+			clear_bit(DAHDI_FLAGBIT_OPEN, &chan->flags);
+			return -ENXIO;
 		}
-	} else
-		res = -ENXIO;
+
+		res = initialize_channel(chan);
+		if (res) {
+			/* Reallocbufs must have failed */
+			clear_bit(DAHDI_FLAGBIT_OPEN, &chan->flags);
+			return res;
+		}
+
+		spin_lock_irqsave(&chan->lock, flags);
+		if (is_pseudo_chan(chan))
+			chan->flags |= DAHDI_FLAG_AUDIO;
+		chan->file = file;
+		file->private_data = chan;
+		/* Since we know we're a channel now, we can
+		 * update the f_op pointer and bypass a few of
+		 * the checks on the minor number. */
+		file->f_op = &dahdi_chan_fops;
+		spin_unlock_irqrestore(&chan->lock, flags);
+
+		if (ops && ops->open) {
+			res = ops->open(chan);
+			if (res) {
+				spin_lock_irqsave(&chan->lock, flags);
+				chan->file = NULL;
+				file->private_data = NULL;
+				spin_unlock_irqrestore(&chan->lock, flags);
+				module_put(ops->owner);
+				close_channel(chan);
+				clear_bit(DAHDI_FLAGBIT_OPEN,
+					  &chan->flags);
+			}
+		}
+	} else {
+		res = -EBUSY;
+	}
 	return res;
 }
 
@@ -3834,6 +3869,31 @@ void dahdi_alarm_channel(struct dahdi_chan *chan, int alarms)
 	spin_unlock_irqrestore(&chan->lock, flags);
 }
 
+struct dahdi_span *get_master_span(void)
+{
+	return master_span;
+}
+
+void set_master_span(int spanno)
+{
+	struct dahdi_span *s;
+	unsigned long flags;
+	struct dahdi_span *old_master;
+
+	spin_lock_irqsave(&chan_lock, flags);
+	old_master = master_span;
+	list_for_each_entry(s, &span_list, spans_node) {
+		if (spanno == s->spanno) {
+			master_span = s;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&chan_lock, flags);
+	if ((debug & DEBUG_MAIN) && (old_master != master_span))
+		module_printk(KERN_NOTICE, "Master span is set to %d (%s)\n",
+			master_span->spanno, master_span->name);
+}
+
 static void __dahdi_find_master_span(void)
 {
 	struct dahdi_span *s;
@@ -3841,7 +3901,7 @@ static void __dahdi_find_master_span(void)
 	struct dahdi_span *old_master;
 
 	spin_lock_irqsave(&chan_lock, flags);
-	old_master = master;
+	old_master = master_span;
 	list_for_each_entry(s, &span_list, spans_node) {
 		if (s->alarms && old_master)
 			continue;
@@ -3851,15 +3911,15 @@ static void __dahdi_find_master_span(void)
 			continue;
 		if (!can_provide_timing(s))
 			continue;
-		if (master == s)
+		if (master_span == s)
 			continue;
 
-		master = s;
+		master_span = s;
 		break;
 	}
 	spin_unlock_irqrestore(&chan_lock, flags);
 
-	if ((debug & DEBUG_MAIN) && (old_master != master))
+	if ((debug & DEBUG_MAIN) && (old_master != master_span))
 		module_printk(KERN_NOTICE, "Master changed to %s\n", s->name);
 }
 
@@ -3900,7 +3960,7 @@ void dahdi_alarm_notify(struct dahdi_span *span)
 			dahdi_alarm_channel(span->chans[x], span->alarms);
 
 		/* If we're going into or out of alarm we should try to find a
-		 * new master that may be a better fit. */
+		 * new master_span that may be a better fit. */
 		dahdi_find_master_span();
 
 		/* Report more detailed alarms */
@@ -5130,7 +5190,7 @@ static int dahdi_ioctl_startup(struct file *file, unsigned long data)
 		}
 
 		/* Now that this span is running, it might be selected as the
-		 * master span */
+		 * master_span */
 		__dahdi_find_master_span();
 	}
 	put_span(s);
@@ -5190,7 +5250,6 @@ static bool dahdi_is_hwec_available(const struct dahdi_chan *chan)
 
 static int dahdi_ioctl_attach_echocan(unsigned long data)
 {
-	unsigned long flags;
 	struct dahdi_chan *chan;
 	struct dahdi_attach_echocan ae;
 	const struct dahdi_echocan_factory *new = NULL, *old;
@@ -5232,10 +5291,10 @@ static int dahdi_ioctl_attach_echocan(unsigned long data)
 		}
 	}
 
-	spin_lock_irqsave(&chan->lock, flags);
+	mutex_lock(&chan->mutex);
 	old = chan->ec_factory;
 	chan->ec_factory = new;
-	spin_unlock_irqrestore(&chan->lock, flags);
+	mutex_unlock(&chan->mutex);
 
 	if (old)
 		release_echocan(old);
@@ -6306,6 +6365,7 @@ ioctl_echocancel(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
 
 	if (ecp->tap_length == 0) {
 		/* disable mode, don't need to inspect params */
+		mutex_lock(&chan->mutex);
 		spin_lock_irqsave(&chan->lock, flags);
 		ec_state = chan->ec_state;
 		chan->ec_state = NULL;
@@ -6316,7 +6376,7 @@ ioctl_echocancel(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
 			ec_state->ops->echocan_free(chan, ec_state);
 			release_echocan(ec_current);
 		}
-
+		mutex_unlock(&chan->mutex);
 		return 0;
 	}
 
@@ -6333,6 +6393,7 @@ ioctl_echocancel(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
 		goto exit_with_free;
 	}
 
+	mutex_lock(&chan->mutex);
 	/* free any echocan that may be on the channel already */
 	spin_lock_irqsave(&chan->lock, flags);
 	ec_state = chan->ec_state;
@@ -6403,6 +6464,7 @@ ioctl_echocancel(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
 	}
 
 exit_with_free:
+	mutex_unlock(&chan->mutex);
 	kfree(params);
 
 	return ret;
@@ -7207,7 +7269,7 @@ EXPORT_SYMBOL(dahdi_init_span);
  * @spanno:	The span number we would like assigned. If 0, the first
  *		available spanno/basechan will be used.
  * @basechan:	The base channel number we would like. Ignored if spanno is 0.
- * @prefmaster:	will the new span be preferred as a master?
+ * @prefmaster:	will the new span be preferred as a master_span?
  *
  * Assigns a span for usage with DAHDI. All the channel numbers in it will
  * have their numbering started at basechan.
@@ -7226,6 +7288,7 @@ static int _dahdi_assign_span(struct dahdi_span *span, unsigned int spanno,
 {
 	int res = 0;
 	unsigned int x;
+	unsigned long flags;
 
 	if (!span || !span->ops || !span->ops->owner)
 		return -EFAULT;
@@ -7236,6 +7299,16 @@ static int _dahdi_assign_span(struct dahdi_span *span, unsigned int spanno,
 			 local_spanno(span), span->spanno);
 		return -EINVAL;
 	}
+
+	/* DAHDI_ALARM_NOTOPEN can be set when a span is disabled, i.e. via
+	 * sysfs, so when the span is being reassigned we should make sure it's
+	 * cleared. This eliminates the need for board drivers to re-report
+	 * their alarm states on span reassignment. */
+
+	spin_lock_irqsave(&span->lock, flags);
+	span->alarms &= ~DAHDI_ALARM_NOTOPEN;
+	dahdi_alarm_notify(span);
+	spin_unlock_irqrestore(&span->lock, flags);
 
 	if (span->ops->enable_hw_preechocan ||
 	    span->ops->disable_hw_preechocan) {
@@ -7344,6 +7417,15 @@ static int auto_assign_spans = 1;
 static const char *UNKNOWN = "";
 
 /**
+ * dahdi_auto_assign_spans - is the parameter auto_assign_spans set?
+ */
+int dahdi_get_auto_assign_spans(void)
+{
+	return auto_assign_spans;
+}
+EXPORT_SYMBOL(dahdi_get_auto_assign_spans);
+
+/**
  * _dahdi_register_device - Registers a DAHDI device and assign its spans.
  * @ddev:	the DAHDI device
  *
@@ -7370,6 +7452,7 @@ static int _dahdi_register_device(struct dahdi_device *ddev,
 		__dahdi_init_span(s);
 	}
 
+	ktime_get_ts(&ddev->registration_time);
 	ret = dahdi_sysfs_add_device(ddev, parent);
 	if (ret)
 		return ret;
@@ -7485,8 +7568,8 @@ static int _dahdi_unassign_span(struct dahdi_span *span)
 	for (x=0;x<span->channels;x++)
 		dahdi_chan_unreg(span->chans[x]);
 
-	new_master = master; /* FIXME: locking */
-	if (master == span)
+	new_master = master_span; /* FIXME: locking */
+	if (master_span == span)
 		new_master = NULL;
 
 	spin_lock_irqsave(&chan_lock, flags);
@@ -7497,13 +7580,13 @@ static int _dahdi_unassign_span(struct dahdi_span *span)
 		break;
 	}
 	spin_unlock_irqrestore(&chan_lock, flags);
-	if (master != new_master) {
+	if (master_span != new_master) {
 		if (debug & DEBUG_MAIN) {
 			module_printk(KERN_NOTICE, "%s: Span ('%s') is new master\n", __FUNCTION__,
 				      (new_master)? new_master->name: "no master");
 		}
 	}
-	master = new_master;
+	master_span = new_master;
 	return 0;
 }
 

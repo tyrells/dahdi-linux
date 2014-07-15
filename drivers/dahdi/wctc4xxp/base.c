@@ -50,6 +50,9 @@
 #define WORKQUEUE 1
 #define TASKLET   2
 
+/* Define if you want a debug attribute to test alert processing. */
+#undef EXPORT_FOR_ALERT_ATTRIBUTE
+
 #ifndef DEFERRED_PROCESSING
 #	define DEFERRED_PROCESSING WORKQUEUE
 #endif
@@ -104,6 +107,7 @@
 #define DTE_DEBUG_RX_TIMEOUT	(1 << 4) /* 16 */
 #define DTE_DEBUG_NETWORK_IF	(1 << 5) /* 32 */
 #define DTE_DEBUG_NETWORK_EARLY	(1 << 6) /* 64 */
+#define DTE_DEBUG_ETH_STATS	(1 << 7) /* 128 */
 
 static int debug;
 static char *mode;
@@ -144,14 +148,7 @@ struct rtp_packet {
 	__u8   payload[0];
 } __attribute__((packed));
 
-/* Ethernet packet type for communication control information to the DTE. */
-struct csm_encaps_hdr {
-	struct ethhdr ethhdr;
-	/* CSM_ENCAPS HEADER */
-	__be16 op_code;
-	__u8   seq_num;
-	__u8   control;
-	__be16 channel;
+struct csm_encaps_cmd {
 	/* COMMON PART OF PAYLOAD HEADER */
 	__u8   length;
 	__u8   index;
@@ -160,6 +157,18 @@ struct csm_encaps_hdr {
 	__le16 function;
 	__le16 reserved;
 	__le16 params[0];
+} __attribute__((packed));
+
+/* Ethernet packet type for communication control information to the DTE. */
+struct csm_encaps_hdr {
+	struct ethhdr ethhdr;
+	/* CSM_ENCAPS HEADER */
+	__be16 op_code;
+	__u8   seq_num;
+	__u8   control;
+	__be16 channel;
+	/* There is always at least one command. */
+	struct csm_encaps_cmd cmd;
 } __attribute__((packed));
 
 #define CONTROL_PACKET_OPCODE  0x0001
@@ -174,6 +183,7 @@ struct csm_encaps_hdr {
 #define SUPVSR_CREATE_CHANNEL	0x0010
 
 #define MONITOR_LIVE_INDICATION_TYPE 0x75
+#define VOIP_VCEINFO_TYPE	0x0e
 #define CONFIG_CHANGE_TYPE	0x00
 #define CONFIG_CHANNEL_CLASS	0x02
 #define CONFIG_DEVICE_CLASS	0x06
@@ -182,8 +192,11 @@ struct csm_encaps_hdr {
 #define MAX_FRAME_SIZE 1518
 #define SFRAME_SIZE MAX_FRAME_SIZE
 
-#define DRING_SIZE (1 << 7) /* Must be a power of two */
-#define DRING_MASK (DRING_SIZE-1)
+#define DEFAULT_RX_DRING_SIZE (1 << 6) /* Must be a power of two */
+
+/* Keep the TX ring shorter in order to reduce the amount of time needed to
+ * bring up channels when sending high priority csm_encaps packets. */
+#define DEFAULT_TX_DRING_SIZE (1 << 4) /* Must be a power of two */
 #define MIN_PACKET_LEN  64
 
 /* Transcoder buffer (tcb) */
@@ -192,23 +205,18 @@ struct tcb {
 	struct list_head node;
 	unsigned long timeout;
 	unsigned long retries;
-	/* NOTE:  these flags aren't bit fields because some of the flags are
-	 * combinations of the other ones. */
-#define DO_NOT_AUTO_FREE        (1 << 0)
 #define TX_COMPLETE             (1 << 1)
 #define DO_NOT_CAPTURE          (1 << 2)
-#define __WAIT_FOR_ACK          (1 << 3)
-#define __WAIT_FOR_RESPONSE     (1 << 4)
+#define WAIT_FOR_ACK		(1 << 3)
+#define WAIT_FOR_RESPONSE	(1 << 4)
 #define DTE_CMD_TIMEOUT         (1 << 5)
-#define WAIT_FOR_ACK (__WAIT_FOR_ACK | DO_NOT_AUTO_FREE)
-#define WAIT_FOR_RESPONSE (__WAIT_FOR_RESPONSE | DO_NOT_AUTO_FREE)
-	unsigned long flags;
+	u16 flags;
+	u16 next_index;
+	struct completion *complete;
 	struct tcb *response;
-	struct completion complete;
-	struct timer_list timer;
+	struct channel_pvt *cpvt;
 	/* The number of bytes available in data. */
 	int data_len;
-	spinlock_t lock;
 };
 
 static inline const struct csm_encaps_hdr *
@@ -222,9 +230,7 @@ static inline void
 initialize_cmd(struct tcb *cmd, unsigned long cmd_flags)
 {
 	INIT_LIST_HEAD(&cmd->node);
-	init_completion(&cmd->complete);
 	cmd->flags = cmd_flags;
-	spin_lock_init(&cmd->lock);
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
@@ -292,16 +298,21 @@ struct channel_pvt {
 	u16 seqno;
 	u8 cmd_seqno;
 	u8 ssrc;
+	u8 last_rx_seq_num;
 	u16 timeslot_in_num;	/* DTE timeslot to receive from */
 	u16 timeslot_out_num;	/* DTE timeslot to send data to */
 	u16 chan_in_num;	/* DTE channel to receive from */
 	u16 chan_out_num;	/* DTE channel to send data to */
-	u32 timestamp;
+	u32 last_timestamp;
 	struct {
 		u8 encoder:1;	/* If we're an encoder */
 	};
 	struct channel_stats stats;
 	struct list_head rx_queue; /* Transcoded packets for this channel. */
+
+	/* Used to prevent user space from flooding the firmware. */
+	long samples_in_flight;
+	unsigned long send_time;
 };
 
 struct wcdte {
@@ -311,10 +322,11 @@ struct wcdte {
 	struct list_head node;
 	spinlock_t reglock;
 	wait_queue_head_t waitq;
-	struct semaphore chansem;
+	struct mutex chanlock;
 #define DTE_READY	1
 #define DTE_SHUTDOWN	2
 #define DTE_POLLING	3
+#define DTE_RELOAD	4
 	unsigned long flags;
 
 	/* This is a device-global list of commands that are waiting to be
@@ -362,11 +374,7 @@ struct wcdte {
 	struct napi_struct napi;
 #endif
 	struct timer_list watchdog;
-	atomic_t open_channels;
-	struct timer_list polling;
-#if HZ > 100
-	unsigned long jiffies_at_last_poll;
-#endif
+	u16 open_channels;
 };
 
 struct wcdte_netdev_priv {
@@ -619,28 +627,6 @@ wctc4xxp_net_waitfor_promiscuous(struct wcdte *wc)
 	}
 }
 
-static int  wctc4xxp_turn_off_booted_led(struct wcdte *wc);
-static void wctc4xxp_turn_on_booted_led(struct wcdte *wc);
-
-static int
-wctc4xxp_net_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
-{
-	struct wcdte *wc = wcdte_from_netdev(netdev);
-	switch (cmd) {
-	case 0x89f0:
-		down(&wc->chansem);
-		wctc4xxp_turn_off_booted_led(wc);
-		break;
-	case 0x89f1:
-		wctc4xxp_turn_on_booted_led(wc);
-		up(&wc->chansem);
-		break;
-	default:
-		return -EOPNOTSUPP;
-	};
-	return 0;
-}
-
 #ifdef HAVE_NET_DEVICE_OPS
 static const struct net_device_ops wctc4xxp_netdev_ops = {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 2, 0)
@@ -652,7 +638,6 @@ static const struct net_device_ops wctc4xxp_netdev_ops = {
 	.ndo_stop = &wctc4xxp_net_down,
 	.ndo_start_xmit = &wctc4xxp_net_hard_start_xmit,
 	.ndo_get_stats = &wctc4xxp_net_get_stats,
-	.ndo_do_ioctl = &wctc4xxp_net_ioctl,
 };
 #endif
 
@@ -687,7 +672,6 @@ wctc4xxp_net_register(struct wcdte *wc)
 	netdev->stop = &wctc4xxp_net_down;
 	netdev->hard_start_xmit = &wctc4xxp_net_hard_start_xmit;
 	netdev->get_stats = &wctc4xxp_net_get_stats;
-	netdev->do_ioctl = &wctc4xxp_net_ioctl;
 #	endif
 
 	netdev->promiscuity = 0;
@@ -797,7 +781,7 @@ struct wctc4xxp_descriptor_ring {
 	/* Write ready buffers to the tail. */
 	unsigned int 	tail;
 	/* Array to save the kernel virtual address of pending commands. */
-	struct tcb *pending[DRING_SIZE];
+	struct tcb **pending;
 	/* PCI Bus address of the descriptor list. */
 	dma_addr_t	desc_dma;
 	/*! either DMA_FROM_DEVICE or DMA_TO_DEVICE */
@@ -810,6 +794,12 @@ struct wctc4xxp_descriptor_ring {
 	spinlock_t      lock;
 	/*! PCI device for the card associated with this ring. */
 	struct pci_dev  *pdev;
+	/*! The size of the dring. */
+	unsigned long size;
+	/*! Total number of packets completed. */
+	unsigned long packet_count;
+	/*! Total number of packets with errors. */
+	unsigned long packet_errors;
 };
 
 /**
@@ -829,13 +819,14 @@ wctc4xxp_descriptor(struct wctc4xxp_descriptor_ring *dr, int index)
 
 static int
 wctc4xxp_initialize_descriptor_ring(struct pci_dev *pdev,
-	struct wctc4xxp_descriptor_ring *dr, u32 des1, unsigned int direction)
+	struct wctc4xxp_descriptor_ring *dr, u32 des1, unsigned int direction,
+	unsigned long size)
 {
 	int i;
 	const u32 END_OF_RING = 0x02000000;
 	u8 cache_line_size = 0;
-	struct wctc4xxp_descriptor *d;
 	int add_padding;
+	struct wctc4xxp_descriptor *d = NULL;
 
 	BUG_ON(!pdev);
 	BUG_ON(!dr);
@@ -844,6 +835,7 @@ wctc4xxp_initialize_descriptor_ring(struct pci_dev *pdev,
 		return -EIO;
 
 	memset(dr, 0, sizeof(*dr));
+	dr->size = size;
 
 	/*
 	 * Add some padding to each descriptor to ensure that they are
@@ -857,14 +849,19 @@ wctc4xxp_initialize_descriptor_ring(struct pci_dev *pdev,
 	if (add_padding)
 		dr->padding = (cache_line_size*sizeof(u32)) - sizeof(*d);
 
-	dr->desc = pci_alloc_consistent(pdev,
-			(sizeof(*d)+dr->padding)*DRING_SIZE, &dr->desc_dma);
-
-	if (!dr->desc)
+	dr->pending = kmalloc(sizeof(struct tcb *) * dr->size, GFP_KERNEL);
+	if (!dr->pending)
 		return -ENOMEM;
 
-	memset(dr->desc, 0, (sizeof(*d) + dr->padding) * DRING_SIZE);
-	for (i = 0; i < DRING_SIZE; ++i) {
+	dr->desc = pci_alloc_consistent(pdev,
+			(sizeof(*d)+dr->padding)*dr->size, &dr->desc_dma);
+	if (!dr->desc) {
+		kfree(dr->pending);
+		return -ENOMEM;
+	}
+
+	memset(dr->desc, 0, (sizeof(*d) + dr->padding) * dr->size);
+	for (i = 0; i < dr->size; ++i) {
 		d = wctc4xxp_descriptor(dr, i);
 		memset(d, 0, sizeof(*d));
 		d->des1 = cpu_to_le32(des1);
@@ -912,7 +909,7 @@ wctc4xxp_submit(struct wctc4xxp_descriptor_ring *dr, struct tcb *c)
 
 	SET_OWNED(d); /* That's it until the hardware is done with it. */
 	dr->pending[dr->tail] = c;
-	dr->tail = (dr->tail + 1) & DRING_MASK;
+	dr->tail = (dr->tail + 1) & (dr->size-1);
 	++dr->count;
 	spin_unlock_irqrestore(&dr->lock, flags);
 	return 0;
@@ -925,6 +922,7 @@ wctc4xxp_retrieve(struct wctc4xxp_descriptor_ring *dr)
 	struct tcb *c;
 	unsigned int head = dr->head;
 	unsigned long flags;
+	u32 des0;
 	spin_lock_irqsave(&dr->lock, flags);
 	d = wctc4xxp_descriptor(dr, head);
 	if (d->buffer1 && !OWNED(d)) {
@@ -932,12 +930,22 @@ wctc4xxp_retrieve(struct wctc4xxp_descriptor_ring *dr)
 			SFRAME_SIZE, dr->direction);
 		c = dr->pending[head];
 		WARN_ON(!c);
-		dr->head = (++head) & DRING_MASK;
+		dr->head = (++head) & (dr->size-1);
 		d->buffer1 = 0;
 		--dr->count;
 		WARN_ON(!c);
-		c->data_len = (le32_to_cpu(d->des0) >> 16) & BUFFER1_SIZE_MASK;
-		WARN_ON(c->data_len > SFRAME_SIZE);
+		des0 = le32_to_cpu(d->des0);
+		c->data_len = (des0 >> 16) & BUFFER1_SIZE_MASK;
+		if (des0 & (1<<15)) {
+			++dr->packet_errors;
+			/* The upper layers won't be able to do anything with
+			 * this packet. Free it up and log the error. */
+			free_cmd(c);
+			c = NULL;
+		} else {
+			++dr->packet_count;
+			WARN_ON(c->data_len > SFRAME_SIZE);
+		}
 	} else {
 		c = NULL;
 	}
@@ -953,6 +961,37 @@ static inline int wctc4xxp_getcount(struct wctc4xxp_descriptor_ring *dr)
 	count = dr->count;
 	spin_unlock_irqrestore(&dr->lock, flags);
 	return count;
+}
+
+static inline int wctc4xxp_get_packet_count(struct wctc4xxp_descriptor_ring *dr)
+{
+	unsigned long count;
+	unsigned long flags;
+	spin_lock_irqsave(&dr->lock, flags);
+	count = dr->packet_count;
+	spin_unlock_irqrestore(&dr->lock, flags);
+	return count;
+}
+
+static inline int
+wctc4xxp_get_packet_errors(struct wctc4xxp_descriptor_ring *dr)
+{
+	unsigned long count;
+	unsigned long flags;
+	spin_lock_irqsave(&dr->lock, flags);
+	count = dr->packet_errors;
+	spin_unlock_irqrestore(&dr->lock, flags);
+	return count;
+}
+
+static inline void
+wctc4xxp_set_packet_count(struct wctc4xxp_descriptor_ring *dr,
+			  unsigned long count)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&dr->lock, flags);
+	dr->packet_count = count;
+	spin_unlock_irqrestore(&dr->lock, flags);
 }
 
 static inline void
@@ -1000,14 +1039,8 @@ wctc4xxp_transmit_demand_poll(struct wcdte *wc)
 #endif
 }
 
-/* Returns the size, in bytes, of a CSM_ENCAPS packet, given the number of
- * parameters used. */
-#define SIZE_WITH_N_PARAMETERS(__n) (sizeof(struct csm_encaps_hdr) + \
-	((__n) * (sizeof(u16))))
-
-/* There are 20 bytes in the ethernet header and the common CSM_ENCAPS header
- * that we don't want in the length of the actual CSM_ENCAPS command */
-#define LENGTH_WITH_N_PARAMETERS(__n) (SIZE_WITH_N_PARAMETERS(__n) - 20)
+#define LENGTH_WITH_N_PARAMETERS(__n) (((__n) * sizeof(u16)) + \
+					sizeof(struct csm_encaps_cmd))
 
 static const u8 dst_mac[6] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
 static const u8 src_mac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
@@ -1034,15 +1067,6 @@ setup_supervisor_header(struct wcdte *wc, struct csm_encaps_hdr *hdr)
 }
 
 static void
-setup_channel_header(struct channel_pvt *pvt, struct csm_encaps_hdr *hdr)
-{
-	setup_common_header(pvt->wc, hdr);
-	hdr->op_code = cpu_to_be16(CONTROL_PACKET_OPCODE);
-	hdr->seq_num = (pvt->cmd_seqno++)&0xf;
-	hdr->channel = cpu_to_be16(pvt->chan_in_num);
-}
-
-static void
 create_supervisor_cmd(struct wcdte *wc, struct tcb *cmd, u8 type, u8 class,
 	u16 function, const u16 *parameters, const int num_parameters)
 {
@@ -1056,25 +1080,26 @@ create_supervisor_cmd(struct wcdte *wc, struct tcb *cmd, u8 type, u8 class,
 
 	setup_supervisor_header(wc, hdr);
 
-	hdr->length =		LENGTH_WITH_N_PARAMETERS(num_parameters);
-	hdr->index =		0;
-	hdr->type =		type;
-	hdr->class =		class;
-	hdr->function =		cpu_to_le16(function);
-	hdr->reserved =		0;
+	hdr->cmd.length =	LENGTH_WITH_N_PARAMETERS(num_parameters);
+	hdr->cmd.index =	0;
+	hdr->cmd.type =		type;
+	hdr->cmd.class =	class;
+	hdr->cmd.function =	cpu_to_le16(function);
+	hdr->cmd.reserved =	0;
 
 	for (i = 0; i < num_parameters; ++i)
-		hdr->params[i] = cpu_to_le16(parameters[i]);
+		hdr->cmd.params[i] = cpu_to_le16(parameters[i]);
 
 	cmd->flags = WAIT_FOR_RESPONSE;
-	cmd->data_len = SIZE_WITH_N_PARAMETERS(num_parameters);
+	cmd->data_len = sizeof(struct csm_encaps_hdr) -
+			sizeof(struct csm_encaps_cmd) +
+			hdr->cmd.length;
+	cmd->cpvt = NULL;
 }
 
 static void
-create_channel_cmd(struct channel_pvt *pvt, struct tcb *cmd, u8 type, u8 class,
-	u16 function, const u16 *parameters, int num_parameters)
+setup_channel_header(struct channel_pvt *pvt, struct tcb *cmd)
 {
-	int i;
 	struct csm_encaps_hdr *hdr = cmd->data;
 
 	if (cmd->response) {
@@ -1082,20 +1107,50 @@ create_channel_cmd(struct channel_pvt *pvt, struct tcb *cmd, u8 type, u8 class,
 		cmd->response = NULL;
 	}
 
-	setup_channel_header(pvt, hdr);
-
-	hdr->length =	LENGTH_WITH_N_PARAMETERS(num_parameters);
-	hdr->index =	0;
-	hdr->type =	type;
-	hdr->class =	class;
-	hdr->function =	cpu_to_le16(function);
-	hdr->reserved =	0;
-
-	for (i = 0; i < num_parameters; ++i)
-		hdr->params[i] = cpu_to_le16(parameters[i]);
+	setup_common_header(pvt->wc, hdr);
+	hdr->op_code = cpu_to_be16(CONTROL_PACKET_OPCODE);
+	hdr->seq_num = (pvt->cmd_seqno++)&0xf;
+	hdr->channel = cpu_to_be16(pvt->chan_in_num);
 
 	cmd->flags = WAIT_FOR_RESPONSE;
-	cmd->data_len = SIZE_WITH_N_PARAMETERS(num_parameters);
+	cmd->data_len = sizeof(struct csm_encaps_hdr) -
+				sizeof(struct csm_encaps_cmd);
+	cmd->cpvt = pvt;
+	cmd->next_index = 0;
+}
+
+
+static void
+append_channel_cmd(struct tcb *cmd, u8 type, u8 class, u16 function,
+		   const u16 *parameters, int num_parameters)
+{
+	int i;
+	struct csm_encaps_cmd *csm_cmd = cmd->data + cmd->data_len;
+
+	csm_cmd->length =	LENGTH_WITH_N_PARAMETERS(num_parameters);
+	csm_cmd->index =	cmd->next_index++;
+	csm_cmd->type =		type;
+	csm_cmd->class =	class;
+	csm_cmd->function =	cpu_to_le16(function);
+	csm_cmd->reserved =	0;
+
+	for (i = 0; i < num_parameters; ++i)
+		csm_cmd->params[i] = cpu_to_le16(parameters[i]);
+
+	cmd->data_len += csm_cmd->length;
+	/* Pad it out to a DW boundary */
+	if (cmd->data_len % 4)
+		cmd->data_len += 4 - (cmd->data_len % 4);
+	WARN_ON(cmd->data_len >= SFRAME_SIZE);
+}
+
+static void
+create_channel_cmd(struct channel_pvt *pvt, struct tcb *cmd, u8 type, u8 class,
+	u16 function, const u16 *parameters, int num_parameters)
+{
+	setup_channel_header(pvt, cmd);
+	append_channel_cmd(cmd, type, class, function, parameters,
+			   num_parameters);
 }
 
 static int
@@ -1113,19 +1168,19 @@ send_create_channel_cmd(struct wcdte *wc, struct tcb *cmd, u16 timeslot,
 	if (res)
 		return res;
 
-	if (0x0000 != response_header(cmd)->params[0]) {
+	if (0x0000 != response_header(cmd)->cmd.params[0]) {
 		if (printk_ratelimit()) {
 			dev_warn(&wc->pdev->dev,
 				 "Failed to create channel in timeslot " \
 				 "%d.  Response from DTE was (%04x).\n",
-				 timeslot, response_header(cmd)->params[0]);
+				 timeslot, response_header(cmd)->cmd.params[0]);
 		}
 		free_cmd(cmd->response);
 		cmd->response = NULL;
 		return -EIO;
 	}
 
-	*channel_number = le16_to_cpu(response_header(cmd)->params[1]);
+	*channel_number = le16_to_cpu(response_header(cmd)->cmd.params[1]);
 	free_cmd(cmd->response);
 	cmd->response = NULL;
 	return 0;
@@ -1246,6 +1301,16 @@ send_spu_features_control_cmd(struct wcdte *wc, struct tcb *cmd, u16 options)
 	return wctc4xxp_transmit_cmd_and_wait(wc, cmd);
 }
 
+/* Allows sending more than one CSM_ENCAPS packet in a single ethernet frame. */
+static int send_csme_multi_cmd(struct wcdte *wc, struct tcb *cmd)
+{
+	const u16 parameters[] = {0x1};
+	create_supervisor_cmd(wc, cmd, CONFIG_CHANGE_TYPE,
+		CONFIG_DEVICE_CLASS, 0x010a, parameters,
+		ARRAY_SIZE(parameters));
+	return wctc4xxp_transmit_cmd_and_wait(wc, cmd);
+}
+
 static int
 send_tdm_opt_cmd(struct wcdte *wc, struct tcb *cmd)
 {
@@ -1269,7 +1334,7 @@ send_destroy_channel_cmd(struct wcdte *wc, struct tcb *cmd, u16 channel)
 	if (res)
 		return res;
 	/* Let's check the response for any error codes.... */
-	result = le16_to_cpu(response_header(cmd)->params[0]);
+	result = le16_to_cpu(response_header(cmd)->cmd.params[0]);
 	if (0x0000 != result) {
 		dev_err(&wc->pdev->dev,
 			"Failed to destroy channel %04d (%04x)\n",
@@ -1279,102 +1344,59 @@ send_destroy_channel_cmd(struct wcdte *wc, struct tcb *cmd, u16 channel)
 	return 0;
 }
 
-static int
-send_set_ip_hdr_channel_cmd(struct channel_pvt *pvt, struct tcb *cmd)
+static void
+append_set_ip_hdr_channel_cmd(struct tcb *cmd)
 {
-	int res;
-	u16 result;
-	struct wcdte *wc = pvt->wc;
 	const u16 parameters[] = {0, 0x0045, 0, 0, 0x0040, 0x1180, 0,
 		0xa8c0, 0x0309, 0xa8c0, 0x0309,
-		swab16(pvt->timeslot_out_num + 0x5000),
-		swab16(pvt->timeslot_in_num + 0x5000),
+		swab16(cmd->cpvt->timeslot_out_num + 0x5000),
+		swab16(cmd->cpvt->timeslot_in_num + 0x5000),
 		0, 0};
-	create_channel_cmd(pvt, cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
+	append_channel_cmd(cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
 		0x9000, parameters, ARRAY_SIZE(parameters));
-	res = wctc4xxp_transmit_cmd_and_wait(wc, cmd);
-	if (res)
-		return res;
-	/* Let's check the response for any error codes.... */
-	result = le16_to_cpu(response_header(cmd)->params[0]);
-	if (0x0000 != result) {
-		dev_err(&wc->pdev->dev, "Failure in %s (%04x)\n",
-			__func__, result);
-		return -EIO;
-	}
-	return 0;
 }
 
-static int
-send_voip_vceopt_cmd(struct channel_pvt *pvt, struct tcb *cmd, u16 length)
+static void
+append_voip_vceopt_cmd(struct tcb *cmd, u16 length)
 {
-	int res;
-	u16 result;
-	const u16 parameters[] = {((length << 8)|0x21), 0x1c00, 0x0004, 0, 0};
-	struct wcdte *wc = pvt->wc;
-	create_channel_cmd(pvt, cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
+	const u16 parameters[] = {((length << 8)|0x21), 0x1c00,
+				  0x0004, 0, 0};
+	append_channel_cmd(cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
 		0x8001, parameters, ARRAY_SIZE(parameters));
-	res = wctc4xxp_transmit_cmd_and_wait(wc, cmd);
-	if (res)
-		return res;
-	/* Let's check the response for any error codes.... */
-	result = le16_to_cpu(response_header(cmd)->params[0]);
-	if (0x0000 != result) {
-		dev_err(&wc->pdev->dev, "Failure in %s (%04x)\n",
-			__func__, result);
-		return -EIO;
-	}
-	return 0;
 }
 
-static int
-send_voip_tonectl_cmd(struct channel_pvt *pvt, struct tcb *cmd)
+static void
+append_voip_tonectl_cmd(struct tcb *cmd)
 {
-	int res;
-	u16 result;
 	const u16 parameters[] = {0};
-	struct wcdte *wc = pvt->wc;
-	create_channel_cmd(pvt, cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
+	append_channel_cmd(cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
 		0x805b, parameters, ARRAY_SIZE(parameters));
-	res = wctc4xxp_transmit_cmd_and_wait(wc, cmd);
-	if (res)
-		return res;
-	/* Let's check the response for any error codes.... */
-	result = le16_to_cpu(response_header(cmd)->params[0]);
-	if (0x0000 != result) {
-		dev_err(&wc->pdev->dev, "Failure in %s (%04x)\n",
-			__func__, result);
-		return -EIO;
-	}
-	return 0;
 }
 
-static int
-send_voip_dtmfopt_cmd(struct channel_pvt *pvt, struct tcb *cmd)
+static void
+append_voip_dtmfopt_cmd(struct tcb *cmd)
 {
 	const u16 parameters[] = {0x0008};
-	create_channel_cmd(pvt, cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
+	append_channel_cmd(cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
 		0x8002, parameters, ARRAY_SIZE(parameters));
-	return wctc4xxp_transmit_cmd_and_wait(pvt->wc, cmd);
 }
 
-static int
-send_voip_indctrl_cmd(struct channel_pvt *pvt, struct tcb *cmd)
+static void
+append_voip_indctrl_cmd(struct tcb *cmd)
 {
 	const u16 parameters[] = {0x0007};
-	create_channel_cmd(pvt, cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
+	append_channel_cmd(cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
 		0x8084, parameters, ARRAY_SIZE(parameters));
-	return wctc4xxp_transmit_cmd_and_wait(pvt->wc, cmd);
 }
 
-static int
+static void
 send_voip_vopena_cmd(struct channel_pvt *pvt, struct tcb *cmd, u8 format)
 {
 	const u16 parameters[] = {1, ((format<<8)|0x80), 0, 0, 0,
 		0x3412, 0x7856};
 	create_channel_cmd(pvt, cmd, CONFIG_CHANGE_TYPE, CONFIG_CHANNEL_CLASS,
 		0x8000, parameters, ARRAY_SIZE(parameters));
-	return wctc4xxp_transmit_cmd_and_wait(pvt->wc, cmd);
+	wctc4xxp_transmit_cmd(pvt->wc, cmd);
 }
 
 static int
@@ -1388,7 +1410,7 @@ send_voip_vopena_close_cmd(struct channel_pvt *pvt, struct tcb *cmd)
 	if (res)
 		return res;
 	/* Let's check the response for any error codes.... */
-	if (0x0000 != response_header(cmd)->params[0]) {
+	if (0x0000 != response_header(cmd)->cmd.params[0]) {
 		WARN_ON(1);
 		return -EIO;
 	}
@@ -1421,7 +1443,7 @@ _send_trans_connect_cmd(struct wcdte *wc, struct tcb *cmd, u16 enable, u16
 		return res;
 
 	/* Let's check the response for any error codes.... */
-	if (0x0000 != response_header(cmd)->params[0]) {
+	if (0x0000 != response_header(cmd)->cmd.params[0]) {
 		WARN_ON(1);
 		return -EIO;
 	}
@@ -1446,11 +1468,75 @@ send_trans_disconnect_cmd(struct wcdte *wc, struct tcb *cmd, const u16
 		decoder_channel, encoder_format, decoder_format);
 }
 
+static int
+send_voip_vceinfo_cmd(struct channel_pvt *pvt, struct tcb *cmd)
+{
+	int res;
+	const u16 parameters[] = {0};
+	static const int CONFIG_CHANNEL_STATS_CLASS = 1;
+	create_channel_cmd(pvt, cmd,
+		VOIP_VCEINFO_TYPE, CONFIG_CHANNEL_STATS_CLASS,
+		0x0000, parameters, 0);
+	res = wctc4xxp_transmit_cmd_and_wait(pvt->wc, cmd);
+	return res;
+}
+
+static int
+send_eth_statistics_cmd(struct wcdte *wc, struct tcb *cmd)
+{
+	int res;
+	const u16 parameters[] = {0};
+
+	create_supervisor_cmd(wc, cmd, 0x00, 0x05, 0x0000,
+		parameters, ARRAY_SIZE(parameters));
+	res = wctc4xxp_transmit_cmd_and_wait(wc, cmd);
+	if (res)
+		return -EIO;
+	if (0x0000 != response_header(cmd)->cmd.params[0]) {
+		dev_info(&wc->pdev->dev,
+			 "Failed to get ethernet stats: 0x%04x\n",
+			 response_header(cmd)->cmd.params[0]);
+		res = -EIO;
+	}
+	return res;
+}
+
+static void wctc4xxp_match_packet_counts(struct wcdte *wc)
+{
+	struct tcb *cmd  = alloc_cmd(SFRAME_SIZE);
+	int res;
+	u32 *parms;
+
+	res = send_eth_statistics_cmd(wc, cmd);
+	if (0 == res) {
+		parms = (u32 *)(&response_header(cmd)->cmd.params[0]);
+		wctc4xxp_set_packet_count(wc->rxd, parms[1]);
+		wctc4xxp_set_packet_count(wc->txd, parms[2]);
+	}
+	free_cmd(cmd);
+}
+
+static inline u32 wctc4xxp_bytes_to_samples(u32 fmt, size_t count)
+{
+	switch (fmt) {
+	case DAHDI_FORMAT_G723_1:
+		return count * (G723_SAMPLES/G723_5K_BYTES);
+	case DAHDI_FORMAT_ULAW:
+	case DAHDI_FORMAT_ALAW:
+		return count;
+	case DAHDI_FORMAT_G729A:
+		return count * (G729_SAMPLES/G729_BYTES);
+	default:
+		WARN_ON(1);
+		return 0;
+	}
+}
+
 static struct tcb *
 wctc4xxp_create_rtp_cmd(struct wcdte *wc, struct dahdi_transcoder_channel *dtc,
 	size_t inbytes)
 {
-	const struct channel_pvt *cpvt = dtc->pvt;
+	struct channel_pvt *cpvt = dtc->pvt;
 	struct rtp_packet *packet;
 	struct tcb *cmd;
 
@@ -1458,6 +1544,7 @@ wctc4xxp_create_rtp_cmd(struct wcdte *wc, struct dahdi_transcoder_channel *dtc,
 	if (!cmd)
 		return NULL;
 
+	cmd->cpvt = cpvt;
 	packet = cmd->data;
 
 	BUG_ON(cmd->data_len < sizeof(*packet));
@@ -1498,8 +1585,11 @@ wctc4xxp_create_rtp_cmd(struct wcdte *wc, struct dahdi_transcoder_channel *dtc,
 	packet->rtphdr.marker =	    0;
 	packet->rtphdr.type =	    wctc4xxp_dahdifmt_to_dtefmt(dtc->srcfmt);
 	packet->rtphdr.seqno =	    cpu_to_be16(cpvt->seqno);
-	packet->rtphdr.timestamp =  cpu_to_be32(cpvt->timestamp);
+	packet->rtphdr.timestamp =  cpu_to_be32(cpvt->last_timestamp);
 	packet->rtphdr.ssrc =	    cpu_to_be32(cpvt->ssrc);
+
+	cpvt->last_timestamp +=     wctc4xxp_bytes_to_samples(dtc->srcfmt,
+							      inbytes);
 
 	WARN_ON(cmd->data_len > SFRAME_SIZE);
 	return cmd;
@@ -1513,7 +1603,7 @@ wctc4xxp_cleanup_descriptor_ring(struct wctc4xxp_descriptor_ring *dr)
 	if (!dr || !dr->desc)
 		return;
 
-	for (i = 0; i < DRING_SIZE; ++i) {
+	for (i = 0; i < dr->size; ++i) {
 		d = wctc4xxp_descriptor(dr, i);
 		if (d->buffer1) {
 			pci_unmap_single(dr->pdev, d->buffer1,
@@ -1530,8 +1620,32 @@ wctc4xxp_cleanup_descriptor_ring(struct wctc4xxp_descriptor_ring *dr)
 	dr->head = 0;
 	dr->tail = 0;
 	dr->count = 0;
-	pci_free_consistent(dr->pdev, (sizeof(*d)+dr->padding) * DRING_SIZE,
+	pci_free_consistent(dr->pdev, (sizeof(*d)+dr->padding) * dr->size,
 		dr->desc, dr->desc_dma);
+	kfree(dr->pending);
+}
+
+static void wctc4xxp_timeout_all_commands(struct wcdte *wc)
+{
+	struct tcb *cmd;
+	struct tcb *temp;
+	unsigned long flags;
+	LIST_HEAD(local_list);
+
+	spin_lock_irqsave(&wc->cmd_list_lock, flags);
+	list_splice_init(&wc->waiting_for_response_list, &local_list);
+	list_splice_init(&wc->cmd_list, &local_list);
+	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
+
+	list_for_each_entry_safe(cmd, temp, &local_list, node) {
+		list_del_init(&cmd->node);
+		if (cmd->complete) {
+			cmd->flags |= DTE_CMD_TIMEOUT;
+			complete(cmd->complete);
+		} else {
+			free_cmd(cmd);
+		}
+	}
 }
 
 static void wctc4xxp_cleanup_command_list(struct wcdte *wc)
@@ -1553,49 +1667,25 @@ static void wctc4xxp_cleanup_command_list(struct wcdte *wc)
 	}
 }
 
-/**
- * The command list is used to store commands that couldn't fit in the tx
- * descriptor list when they were requested.
- */
-static void
-wctc4xxp_add_to_command_list(struct wcdte *wc, struct tcb *cmd)
+static inline bool is_rtp_packet(const struct tcb *cmd)
 {
-	unsigned long flags;
-	spin_lock_irqsave(&wc->cmd_list_lock, flags);
-	list_add_tail(&cmd->node, &wc->cmd_list);
-	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
-}
-
-static void
-wctc4xxp_add_to_response_list(struct wcdte *wc, struct tcb *cmd)
-{
-	unsigned long flags;
-	spin_lock_irqsave(&wc->cmd_list_lock, flags);
-	list_add_tail(&cmd->node, &wc->waiting_for_response_list);
-	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
-}
-
-static void
-wctc4xxp_remove_from_response_list(struct wcdte *wc, struct tcb *cmd)
-{
-	unsigned long flags;
-	spin_lock_irqsave(&wc->cmd_list_lock, flags);
-	list_del_init(&cmd->node);
-	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
+	const struct ethhdr *ethhdr = cmd->data;
+	return (cpu_to_be16(ETH_P_IP) == ethhdr->h_proto);
 }
 
 static void
 wctc4xxp_transmit_cmd(struct wcdte *wc, struct tcb *cmd)
 {
 	int res;
+	unsigned long flags;
 
 	/* If we're shutdown all commands will timeout. Just complete the
 	 * command here with the timeout flag */
 	if (unlikely(test_bit(DTE_SHUTDOWN, &wc->flags))) {
-		if (cmd->flags & DO_NOT_AUTO_FREE) {
+		if (cmd->complete) {
 			cmd->flags |= DTE_CMD_TIMEOUT;
 			list_del_init(&cmd->node);
-			complete(&cmd->complete);
+			complete(cmd->complete);
 		} else {
 			list_del(&cmd->node);
 			free_cmd(cmd);
@@ -1611,8 +1701,10 @@ wctc4xxp_transmit_cmd(struct wcdte *wc, struct tcb *cmd)
 	WARN_ON(cmd->response);
 	WARN_ON(cmd->flags & TX_COMPLETE);
 	cmd->timeout = jiffies + HZ/4;
-	if (cmd->flags & (__WAIT_FOR_ACK | __WAIT_FOR_RESPONSE)) {
-		if (cmd->flags & __WAIT_FOR_RESPONSE) {
+
+	spin_lock_irqsave(&wc->cmd_list_lock, flags);
+	if (cmd->flags & (WAIT_FOR_ACK | WAIT_FOR_RESPONSE)) {
+		if (cmd->flags & WAIT_FOR_RESPONSE) {
 			/* We don't need both an ACK and a response.  Let's
 			 * tell the DTE not to generate an ACK, and we'll just
 			 * retry if we do not get the response within the
@@ -1621,11 +1713,17 @@ wctc4xxp_transmit_cmd(struct wcdte *wc, struct tcb *cmd)
 			hdr->control |= SUPPRESS_ACK;
 		}
 		WARN_ON(!list_empty(&cmd->node));
-		wctc4xxp_add_to_response_list(wc, cmd);
+		list_add_tail(&cmd->node, &wc->waiting_for_response_list);
 		mod_timer(&wc->watchdog, jiffies + HZ/2);
 	}
-	if (!(cmd->flags & DO_NOT_CAPTURE))
-		wctc4xxp_net_capture_cmd(wc, cmd);
+	if (!list_empty(&wc->cmd_list)) {
+		if (is_rtp_packet(cmd))
+			list_add_tail(&cmd->node, &wc->cmd_list);
+		else
+			list_move(&cmd->node, &wc->cmd_list);
+		spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
+		return;
+	}
 	res = wctc4xxp_submit(wc->txd, cmd);
 	if (-EBUSY == res) {
 		/* Looks like we're out of room in the descriptor
@@ -1633,22 +1731,26 @@ wctc4xxp_transmit_cmd(struct wcdte *wc, struct tcb *cmd)
 		 * and the interrupt service routine will pull from
 		 * this list as it clears up room in the descriptor
 		 * ring. */
-		wctc4xxp_remove_from_response_list(wc, cmd);
-		wctc4xxp_add_to_command_list(wc, cmd);
+		list_move_tail(&cmd->node, &wc->cmd_list);
 	} else if (0 == res) {
+		if (!(cmd->flags & DO_NOT_CAPTURE))
+			wctc4xxp_net_capture_cmd(wc, cmd);
 		wctc4xxp_transmit_demand_poll(wc);
 	} else {
 		/* Unknown return value... */
 		WARN_ON(1);
 	}
+	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
 }
 
 static int
 wctc4xxp_transmit_cmd_and_wait(struct wcdte *wc, struct tcb *cmd)
 {
-	cmd->flags |= DO_NOT_AUTO_FREE;
+	DECLARE_COMPLETION_ONSTACK(done);
+	cmd->complete = &done;
 	wctc4xxp_transmit_cmd(wc, cmd);
-	wait_for_completion(&cmd->complete);
+	wait_for_completion(&done);
+	cmd->complete = NULL;
 	if (cmd->flags & DTE_CMD_TIMEOUT) {
 		DTE_DEBUG(DTE_DEBUG_GENERAL, "Timeout waiting for command.\n");
 		return -EIO;
@@ -1660,7 +1762,6 @@ static int wctc4xxp_create_channel_pair(struct wcdte *wc,
 		struct channel_pvt *cpvt, u8 simple, u8 complicated);
 static int wctc4xxp_destroy_channel_pair(struct wcdte *wc,
 		struct channel_pvt *cpvt);
-static int __wctc4xxp_setup_channels(struct wcdte *wc);
 
 static void
 wctc4xxp_init_state(struct channel_pvt *cpvt, int encoder,
@@ -1674,6 +1775,7 @@ wctc4xxp_init_state(struct channel_pvt *cpvt, int encoder,
 	cpvt->ssrc = 0x78;
 	cpvt->timeslot_in_num = channel*2;
 	cpvt->timeslot_out_num = channel*2;
+	cpvt->last_rx_seq_num = 0xff;
 	if (encoder)
 		++cpvt->timeslot_out_num;
 	else
@@ -1702,9 +1804,20 @@ wctc4xxp_cleanup_channel_private(struct wcdte *wc,
 	unsigned long flags;
 	LIST_HEAD(local_list);
 
+	/* Once we cleanup this channel, we do not want any queued packets
+	 * waiting to be transmitted. Anything on the hardware descriptor ring
+	 * will be flushed by the csm_encaps command to shutdown the channel. */
+	spin_lock_irqsave(&wc->cmd_list_lock, flags);
+	list_for_each_entry_safe(cmd, temp, &wc->cmd_list, node) {
+		if (cmd->cpvt == cpvt)
+			list_move(&cmd->node, &local_list);
+	}
+	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
+
 	spin_lock_irqsave(&cpvt->lock, flags);
 	list_splice_init(&cpvt->rx_queue, &local_list);
 	dahdi_tc_clear_data_waiting(dtc);
+	cpvt->samples_in_flight = 0;
 	spin_unlock_irqrestore(&cpvt->lock, flags);
 
 	memset(&cpvt->stats, 0, sizeof(cpvt->stats));
@@ -1714,7 +1827,7 @@ wctc4xxp_cleanup_channel_private(struct wcdte *wc,
 	}
 }
 
-static int
+static void
 wctc4xxp_mark_channel_complement_built(struct wcdte *wc,
 	struct dahdi_transcoder_channel *dtc)
 {
@@ -1741,8 +1854,6 @@ wctc4xxp_mark_channel_complement_built(struct wcdte *wc,
 	compl_cpvt->chan_out_num = cpvt->chan_in_num;
 	dahdi_tc_set_built(compl_dtc);
 	wctc4xxp_cleanup_channel_private(wc, dtc);
-
-	return 0;
 }
 
 static int
@@ -1754,18 +1865,10 @@ do_channel_allocate(struct dahdi_transcoder_channel *dtc)
 	u8 wctc4xxp_dstfmt; /* Digium Transcoder Engine Dest Format */
 	int res;
 
-#ifndef DEBUG_WCTC4XXP
-	down(&wc->chansem);
-#else
-	if (down_interruptible(&wc->chansem))
-		return -EINTR;
-#endif
-
 	/* Check again to see if the channel was built after grabbing the
-	 * channel semaphore, in case the previous holder of the semaphore
+	 * channel lock, in case the previous holder of the lock
 	 * built this channel as a complement to itself. */
 	if (dahdi_tc_is_built(dtc)) {
-		up(&wc->chansem);
 		DTE_DEBUG(DTE_DEBUG_CHANNEL_SETUP,
 		  "Allocating channel %p which is already built.\n", dtc);
 		return 0;
@@ -1782,8 +1885,12 @@ do_channel_allocate(struct dahdi_transcoder_channel *dtc)
 	res = wctc4xxp_create_channel_pair(wc, cpvt, wctc4xxp_srcfmt,
 		wctc4xxp_dstfmt);
 	if (res) {
-		/* There was a problem creating the channel.... */
-		up(&wc->chansem);
+		dev_err(&wc->pdev->dev, "Failed to create channel pair.\n");
+		/* A failure to create a channel pair is normally a critical
+		 * error in the firmware state. Reload the firmware when this
+		 * handle is closed. */
+		set_bit(DTE_RELOAD, &wc->flags);
+		set_bit(DTE_SHUTDOWN, &wc->flags);
 		return res;
 	}
 	/* Mark this channel as built */
@@ -1794,10 +1901,9 @@ do_channel_allocate(struct dahdi_transcoder_channel *dtc)
 	  dtc->srcfmt);
 	/* Mark the channel complement (other half of encoder/decoder pair) as
 	 * built */
-	res = wctc4xxp_mark_channel_complement_built(wc, dtc);
-	up(&wc->chansem);
+	wctc4xxp_mark_channel_complement_built(wc, dtc);
 	dahdi_transcoder_alert(dtc);
-	return res;
+	return 0;
 }
 
 static void
@@ -1807,10 +1913,12 @@ wctc4xxp_setintmask(struct wcdte *wc, unsigned int intmask)
 	wctc4xxp_setctl(wc, 0x0038, intmask);
 }
 
+static const u32 DEFAULT_INTERRUPTS = 0x0001a0c0;
+
 static void
 wctc4xxp_enable_interrupts(struct wcdte *wc)
 {
-	wctc4xxp_setintmask(wc, 0x000180c0);
+	wctc4xxp_setintmask(wc, DEFAULT_INTERRUPTS);
 }
 
 static void
@@ -1825,23 +1933,59 @@ static void
 wctc4xxp_enable_polling(struct wcdte *wc)
 {
 	set_bit(DTE_POLLING, &wc->flags);
-	mod_timer(&wc->polling, jiffies + 1);
-	wctc4xxp_disable_interrupts(wc);
+	wctc4xxp_setctl(wc, 0x0058, 0x10003);
+	/* Enable the general purpose timer interrupt. */
+	wctc4xxp_setintmask(wc, (DEFAULT_INTERRUPTS | (1 << 11)) & ~0x41);
+}
+
+static int wctc4xxp_reset_driver_state(struct wcdte *wc);
+
+static bool wctc4xxp_need_firmware_reload(struct wcdte *wc)
+{
+	return !!test_bit(DTE_RELOAD, &wc->flags) &&
+		(1 == wc->open_channels);
+}
+
+static int wctc4xxp_reload_firmware(struct wcdte *wc)
+{
+	int res;
+	clear_bit(DTE_SHUTDOWN, &wc->flags);
+	res = wctc4xxp_reset_driver_state(wc);
+	if (res)
+		set_bit(DTE_SHUTDOWN, &wc->flags);
+	else
+		clear_bit(DTE_RELOAD, &wc->flags);
+	return res;
 }
 
 static int
 wctc4xxp_operation_allocate(struct dahdi_transcoder_channel *dtc)
 {
+	int res = 0;
 	struct wcdte *wc = ((struct channel_pvt *)(dtc->pvt))->wc;
 
-	if (unlikely(test_bit(DTE_SHUTDOWN, &wc->flags))) {
-		/* The shudown flags can also be set if there is a
-		 * catastrophic failure. */
-		return -EIO;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 24)
+	mutex_lock(&wc->chanlock);
+#else
+	res = mutex_lock_killable(&wc->chanlock);
+	if (res)
+		return res;
+#endif
+
+	++wc->open_channels;
+
+	if (test_bit(DTE_SHUTDOWN, &wc->flags)) {
+		res = -EIO;
+		if (wctc4xxp_need_firmware_reload(wc)) 
+			res = wctc4xxp_reload_firmware(wc);
+	} else if (wctc4xxp_need_firmware_reload(wc)) {
+		res = wctc4xxp_reload_firmware(wc);
 	}
 
-	atomic_inc(&wc->open_channels);
-	if (atomic_read(&wc->open_channels) > POLLING_CALL_THRESHOLD) {
+	if (res)
+		goto error_exit;
+
+	if (wc->open_channels > POLLING_CALL_THRESHOLD) {
 		if (!test_bit(DTE_POLLING, &wc->flags))
 			wctc4xxp_enable_polling(wc);
 	}
@@ -1849,22 +1993,42 @@ wctc4xxp_operation_allocate(struct dahdi_transcoder_channel *dtc)
 	if (dahdi_tc_is_built(dtc)) {
 		DTE_DEBUG(DTE_DEBUG_CHANNEL_SETUP,
 		  "Allocating channel %p which is already built.\n", dtc);
-		return 0;
+		res = 0;
+	} else {
+		res = do_channel_allocate(dtc);
 	}
-	return do_channel_allocate(dtc);
+
+error_exit:
+	mutex_unlock(&wc->chanlock);
+	return res;
 }
 
 static void
 wctc4xxp_disable_polling(struct wcdte *wc)
 {
 	clear_bit(DTE_POLLING, &wc->flags);
+	wctc4xxp_setctl(wc, 0x0058, 0x0);
 	wctc4xxp_enable_interrupts(wc);
+}
+
+static void wctc4xxp_check_for_rx_errors(struct wcdte *wc)
+{
+	static unsigned long last_errors = 0;
+	unsigned long errors = wctc4xxp_get_packet_errors(wc->rxd);
+	if (last_errors != errors) {
+		if (printk_ratelimit()) {
+			dev_err(&wc->pdev->dev,
+				"%lu errored receive packets.\n",
+				errors - last_errors);
+			last_errors = errors;
+		}
+	}
 }
 
 static int
 wctc4xxp_operation_release(struct dahdi_transcoder_channel *dtc)
 {
-	int res;
+	int res = 0;
 	int index;
 	/* This is the 'complimentary channel' to dtc.  I.e., if dtc is an
 	 * encoder, compl_dtc is the decoder and vice-versa */
@@ -1877,39 +2041,52 @@ wctc4xxp_operation_release(struct dahdi_transcoder_channel *dtc)
 	BUG_ON(!cpvt);
 	BUG_ON(!wc);
 
-	if (unlikely(test_bit(DTE_SHUTDOWN, &wc->flags))) {
-		/* The shudown flags can also be set if there is a
-		 * catastrophic failure. */
-		return -EIO;
-	}
-
-#ifndef DEBUG_WCTC4XXP
-	down(&wc->chansem);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 24)
+	mutex_lock(&wc->chanlock);
 #else
-	if (down_interruptible(&wc->chansem))
-		return -EINTR;
+	res = mutex_lock_killable(&wc->chanlock);
+	if (res)
+		return res;
 #endif
 
-	atomic_dec(&wc->open_channels);
+	if (test_bit(DTE_SHUTDOWN, &wc->flags)) {
+		/* On shutdown, if we reload the firmware we will reset the
+		 * state of all the channels. Therefore we do not want to
+		 * process any of the channel release logic even if the firmware
+		 * was reloaded successfully. */
+		if (wctc4xxp_need_firmware_reload(wc)) 
+			wctc4xxp_reload_firmware(wc);
+		res = -EIO;
+	} else if (wctc4xxp_need_firmware_reload(wc)) {
+		wctc4xxp_reload_firmware(wc);
+		res = -EIO;
+	}
+
+	if (wc->open_channels) {
+		--wc->open_channels;
 
 #if !defined(CONFIG_WCTC4XXP_POLLING)
-	if (atomic_read(&wc->open_channels) < POLLING_CALL_THRESHOLD) {
-		if (test_bit(DTE_POLLING, &wc->flags))
-			wctc4xxp_disable_polling(wc);
-	}
+		if (wc->open_channels < POLLING_CALL_THRESHOLD) {
+			if (test_bit(DTE_POLLING, &wc->flags))
+				wctc4xxp_disable_polling(wc);
+		}
 #endif
+	}
+
+	if (res)
+		goto error_exit;
 
 	packets_received = atomic_read(&cpvt->stats.packets_received);
 	packets_sent = atomic_read(&cpvt->stats.packets_sent);
 
-	if ((packets_sent - packets_received) > 5) {
-		DTE_DEBUG(DTE_DEBUG_GENERAL, "%s channel %d sent %d packets "
-			"and received %d packets.\n", (cpvt->encoder) ?
-			"encoder" : "decoder", cpvt->chan_out_num,
-			packets_sent, packets_received);
-	}
+	DTE_DEBUG(DTE_DEBUG_ETH_STATS,
+		"%s channel %d sent %d packets and received %d packets.\n",
+		(cpvt->encoder) ?  "encoder" : "decoder", cpvt->chan_out_num,
+		packets_sent, packets_received);
+
 
 	/* Remove any packets that are waiting on the outbound queue. */
+	dahdi_tc_clear_busy(dtc);
 	wctc4xxp_cleanup_channel_private(wc, dtc);
 	index = cpvt->timeslot_in_num/2;
 	BUG_ON(index >= wc->numchannels);
@@ -1946,8 +2123,11 @@ wctc4xxp_operation_release(struct dahdi_transcoder_channel *dtc)
 	compl_cpvt = compl_dtc->pvt;
 	compl_cpvt->chan_in_num = INVALID;
 	compl_cpvt->chan_out_num = INVALID;
+
+	wctc4xxp_check_for_rx_errors(wc);
+
 error_exit:
-	up(&wc->chansem);
+	mutex_unlock(&wc->chanlock);
 	return res;
 }
 
@@ -2010,23 +2190,6 @@ wctc4xxp_handle_receive_ring(struct wcdte *wc)
 	spin_unlock_irqrestore(&wc->rx_lock, flags);
 	return count;
 }
-
-static void
-__wctc4xxp_polling(struct wcdte *wc)
-{
-	if (wctc4xxp_handle_receive_ring(wc))
-		schedule_work(&wc->deferred_work);
-}
-
-static void
-wctc4xxp_polling(unsigned long data)
-{
-	struct wcdte *wc = (struct wcdte *)data;
-	__wctc4xxp_polling(wc);
-	if (test_bit(DTE_POLLING, &wc->flags))
-		mod_timer(&wc->polling, jiffies + 1);
-}
-
 
 /* Called with a buffer in which to copy a transcoded frame. */
 static ssize_t
@@ -2122,6 +2285,10 @@ wctc4xxp_write(struct file *file, const char __user *frame,
 	struct channel_pvt *cpvt = dtc->pvt;
 	struct wcdte *wc = cpvt->wc;
 	struct tcb *cmd;
+	u32 samples;
+	unsigned long flags;
+	const unsigned long MAX_SAMPLES_IN_FLIGHT = 640;
+	const unsigned long MAX_RTP_PAYLOAD = 500;
 
 	BUG_ON(!cpvt);
 	BUG_ON(!wc);
@@ -2139,11 +2306,10 @@ wctc4xxp_write(struct file *file, const char __user *frame,
 		return -EINVAL;
 	}
 
-	if (unlikely(count > SFRAME_SIZE - sizeof(struct rtp_packet))) {
+	if (count > MAX_RTP_PAYLOAD) {
 		DTE_DEBUG(DTE_DEBUG_GENERAL,
-		   "Cannot transcode packet of %Zu bytes. This exceeds the " \
-		   "maximum size of %Zu bytes.\n", count,
-		   SFRAME_SIZE - sizeof(struct rtp_packet));
+		   "Cannot transcode packet of %Zu bytes. This exceeds the maximum size of %lu bytes.\n",
+		   count, MAX_RTP_PAYLOAD);
 		return -EINVAL;
 	}
 
@@ -2157,13 +2323,25 @@ wctc4xxp_write(struct file *file, const char __user *frame,
 			   G723_6K_BYTES, G723_SID_BYTES);
 			return -EINVAL;
 		}
-		cpvt->timestamp += G723_SAMPLES;
-	} else if (DAHDI_FORMAT_G723_1 == dtc->dstfmt) {
-		cpvt->timestamp = G723_SAMPLES;
-	} else {
-		/* Same for ulaw and alaw */
-		cpvt->timestamp += G729_SAMPLES;
 	}
+
+	/* Do not flood the firmware with packets. This can result in out of
+	 * memory conditions in the firmware. */
+	spin_lock_irqsave(&cpvt->lock, flags);
+	if (time_after(jiffies, cpvt->send_time)) {
+		cpvt->samples_in_flight = max(0L,
+					      cpvt->samples_in_flight - 160L);
+	}
+	samples = wctc4xxp_bytes_to_samples(dtc->srcfmt, count);
+	if ((cpvt->samples_in_flight + samples) > MAX_SAMPLES_IN_FLIGHT) {
+		spin_unlock_irqrestore(&cpvt->lock, flags);
+		/* This should most likely be an error, but it results in
+		 * codec_dahdi spamming when it's not set to wait for new
+		 * packets. Instead we will silently drop the bytes. */
+		return count;
+	}
+	cpvt->send_time = jiffies + msecs_to_jiffies(20);
+	spin_unlock_irqrestore(&cpvt->lock, flags);
 
 	cmd = wctc4xxp_create_rtp_cmd(wc, dtc, count);
 	if (!cmd)
@@ -2184,23 +2362,11 @@ wctc4xxp_write(struct file *file, const char __user *frame,
 	atomic_inc(&cpvt->stats.packets_sent);
 	wctc4xxp_transmit_cmd(wc, cmd);
 
-	if (test_bit(DTE_POLLING, &wc->flags)) {
-#if HZ == 100
-		__wctc4xxp_polling(wc);
-#else
-		if (jiffies != wc->jiffies_at_last_poll) {
-			wc->jiffies_at_last_poll = jiffies;
-			__wctc4xxp_polling(wc);
-		}
-#endif
-	}
-
-
 	return count;
 }
 
 static void
-wctc4xxp_send_ack(struct wcdte *wc, u8 seqno, __be16 channel)
+wctc4xxp_send_ack(struct wcdte *wc, u8 seqno, __be16 channel, __le16 function)
 {
 	struct tcb *cmd;
 	struct csm_encaps_hdr *hdr;
@@ -2216,22 +2382,26 @@ wctc4xxp_send_ack(struct wcdte *wc, u8 seqno, __be16 channel)
 	hdr->seq_num = seqno;
 	hdr->control = 0xe0;
 	hdr->channel = channel;
+	hdr->cmd.function = function;
 
 	wctc4xxp_transmit_cmd(wc, cmd);
 }
 
-static bool do_rx_response_packet(struct wcdte *wc, struct tcb *cmd)
+
+static void do_rx_response_packet(struct wcdte *wc, struct tcb *cmd)
 {
-	const struct csm_encaps_hdr *listhdr, *rxhdr;
+	struct csm_encaps_hdr *rxhdr;
+	const struct csm_encaps_hdr *listhdr;
 	struct tcb *pos, *temp;
 	unsigned long flags;
 	bool handled = false;
 	rxhdr = cmd->data;
+
+	/* Check if duplicated response on the supervisor channel. */
 	if (SUPERVISOR_CHANNEL == rxhdr->channel) {
-		/* We received a duplicate response. */
 		if (rxhdr->seq_num == wc->last_rx_seq_num) {
 			free_cmd(cmd);
-			return false;
+			return;
 		}
 		wc->last_rx_seq_num = rxhdr->seq_num;
 	}
@@ -2240,18 +2410,26 @@ static bool do_rx_response_packet(struct wcdte *wc, struct tcb *cmd)
 	list_for_each_entry_safe(pos, temp,
 		&wc->waiting_for_response_list, node) {
 		listhdr = pos->data;
-		if ((listhdr->function == rxhdr->function) &&
+		if ((listhdr->cmd.function == rxhdr->cmd.function) &&
 		    (listhdr->channel == rxhdr->channel)) {
 
-			spin_lock(&pos->lock);
+			/* If this is a channel command, do not complete it if
+			 * the seq_num is the same as previous. */
+			if (pos->cpvt) {
+				if (rxhdr->seq_num ==
+				    pos->cpvt->last_rx_seq_num) {
+					break;
+				}
+				pos->cpvt->last_rx_seq_num = rxhdr->seq_num;
+			}
+
 			list_del_init(&pos->node);
-			pos->flags &= ~(__WAIT_FOR_RESPONSE);
+			pos->flags &= ~(WAIT_FOR_RESPONSE);
 			pos->response = cmd;
 			/* If this isn't TX_COMPLETE yet, then this packet will
 			 * be completed in service_tx_ring. */
-			if (pos->flags & TX_COMPLETE)
-				complete(&pos->complete);
-			spin_unlock(&pos->lock);
+			if (pos->flags & TX_COMPLETE && pos->complete)
+				complete(pos->complete);
 			handled = true;
 
 			break;
@@ -2264,10 +2442,7 @@ static bool do_rx_response_packet(struct wcdte *wc, struct tcb *cmd)
 			"Freeing unhandled response ch:(%04x)\n",
 			be16_to_cpu(rxhdr->channel));
 		free_cmd(cmd);
-		return false;
 	}
-
-	return true;
 }
 
 static void
@@ -2285,26 +2460,22 @@ do_rx_ack_packet(struct wcdte *wc, struct tcb *cmd)
 		listhdr = pos->data;
 		if (cpu_to_be16(0xefed) == listhdr->ethhdr.h_proto) {
 			wc->seq_num = (rxhdr->seq_num + 1) & 0xff;
-			WARN_ON(!(pos->flags & DO_NOT_AUTO_FREE));
+			WARN_ON(!(pos->complete));
 			WARN_ON(!(pos->flags & TX_COMPLETE));
 			list_del_init(&pos->node);
-			WARN_ON(!(pos->flags & TX_COMPLETE));
-			complete(&pos->complete);
+			if (pos->complete)
+				complete(pos->complete);
 		} else if ((listhdr->seq_num == rxhdr->seq_num) &&
 			   (listhdr->channel == rxhdr->channel)) {
-			spin_lock(&pos->lock);
-			if (pos->flags & __WAIT_FOR_RESPONSE) {
-				pos->flags &= ~(__WAIT_FOR_ACK);
-				spin_unlock(&pos->lock);
+			if (pos->flags & WAIT_FOR_RESPONSE) {
+				pos->flags &= ~(WAIT_FOR_ACK);
 			} else {
 				list_del_init(&pos->node);
 
-				if (pos->flags & DO_NOT_AUTO_FREE) {
+				if (pos->complete) {
 					WARN_ON(!(pos->flags & TX_COMPLETE));
-					complete(&pos->complete);
-					spin_unlock(&pos->lock);
+					complete(pos->complete);
 				} else {
-					spin_unlock(&pos->lock);
 					free_cmd(pos);
 				}
 			}
@@ -2320,17 +2491,19 @@ do_rx_ack_packet(struct wcdte *wc, struct tcb *cmd)
 static inline int
 is_response(const struct csm_encaps_hdr *hdr)
 {
-	return ((0x02 == hdr->type) || (0x04 == hdr->type)) ? 1 : 0;
+	return ((0x02 == hdr->cmd.type) ||
+		(0x04 == hdr->cmd.type) ||
+		(0x0e == hdr->cmd.type) ||
+		(0x00 == hdr->cmd.type)) ? 1 : 0;
 }
 
 static void
-print_command(struct wcdte *wc, const struct tcb *cmd)
+print_command(struct wcdte *wc, const struct csm_encaps_hdr *hdr)
 {
 	int i, curlength;
-	const struct csm_encaps_hdr *hdr = cmd->data;
 	char *buffer;
 	const int BUFFER_SIZE = 1024;
-	int parameters = ((hdr->length - 8)/sizeof(__le16));
+	int parameters = ((hdr->cmd.length - 8)/sizeof(__le16));
 
 	buffer = kzalloc(BUFFER_SIZE + 1, GFP_ATOMIC);
 	if (!buffer) {
@@ -2344,78 +2517,112 @@ print_command(struct wcdte *wc, const struct tcb *cmd)
 	curlength += snprintf(buffer + curlength, BUFFER_SIZE - curlength,
 		"length: %02x index: %02x type: %02x "
 		"class: %02x function: %04x",
-		hdr->length, hdr->index, hdr->type, hdr->class,
-		le16_to_cpu(hdr->function));
+		hdr->cmd.length, hdr->cmd.index, hdr->cmd.type, hdr->cmd.class,
+		le16_to_cpu(hdr->cmd.function));
 	for (i = 0; i < parameters; ++i) {
 		curlength += snprintf(buffer + curlength,
 			BUFFER_SIZE - curlength, " %04x",
-			le16_to_cpu(hdr->params[i]));
+			le16_to_cpu(hdr->cmd.params[i]));
 	}
 	dev_info(&wc->pdev->dev, "%s\n", buffer);
 	kfree(buffer);
+}
+
+static inline void wctc4xxp_reset_processor(struct wcdte *wc)
+{
+	wctc4xxp_setctl(wc, 0x00A0, 0x04000000);
+}
+
+
+static void handle_csm_alert(struct wcdte *wc,
+			      const struct csm_encaps_hdr *hdr)
+{
+	const struct csm_encaps_cmd *c = &hdr->cmd;
+	if (c->function == 0x0000) {
+		u16 alert_type = le16_to_cpu(c->params[0]);
+		u16 action_required = le16_to_cpu(c->params[1]) >> 8;
+		const bool fatal_error = action_required != 0;
+
+		dev_err(&wc->pdev->dev,
+			"Received alert (0x%04x) from dsp. Firmware will be reloaded when possible.\n",
+			alert_type);
+
+		if (fatal_error) {
+			/* If any fatal errors are reported we'll just shut
+			 * everything down so that we do not hang up any user
+			 * process trying to wait for commands to complete. */
+			wctc4xxp_reset_processor(wc);
+			set_bit(DTE_RELOAD, &wc->flags);
+			set_bit(DTE_SHUTDOWN, &wc->flags);
+			wctc4xxp_timeout_all_commands(wc);
+		} else {
+			/* For non-fatal errors we'll try to proceed and reload
+			 * the firmware when all open channels are closed. This
+			 * will prevent impacting any normal calls in progress.
+			 *
+			 */
+			set_bit(DTE_RELOAD, &wc->flags);
+		}
+	} else {
+		if (debug) {
+			dev_warn(&wc->pdev->dev,
+				 "Received diagnostic message:\n");
+		}
+	}
+
+	if (debug) {
+		print_command(wc, hdr);
+	}
 }
 
 static void
 receive_csm_encaps_packet(struct wcdte *wc, struct tcb *cmd)
 {
 	const struct csm_encaps_hdr *hdr = cmd->data;
+	const struct csm_encaps_cmd *c = &hdr->cmd;
 
 	if (!(hdr->control & MESSAGE_PACKET)) {
 		const bool suppress_ack = ((hdr->control & SUPPRESS_ACK) > 0);
+
+		if (!suppress_ack) {
+			wctc4xxp_send_ack(wc, hdr->seq_num, hdr->channel,
+					  c->function);
+		}
+
 		if (is_response(hdr)) {
-			u8 seq_num = hdr->seq_num;
-			__be16 channel = hdr->channel;
 
-			if (do_rx_response_packet(wc, cmd) && !suppress_ack)
-				wctc4xxp_send_ack(wc, seq_num, channel);
+			do_rx_response_packet(wc, cmd);
 
-		} else if (0xc1 == hdr->type) {
-			if (!suppress_ack) {
-				wctc4xxp_send_ack(wc, hdr->seq_num,
-						  hdr->channel);
-			}
+		} else if (0xc1 == c->type) {
 
-			if (0x75 == hdr->class) {
+			if (0x75 == c->class) {
 				dev_warn(&wc->pdev->dev,
 				   "Received alert (0x%04x) from dsp\n",
-				   le16_to_cpu(hdr->params[0]));
+				   le16_to_cpu(c->params[0]));
 			}
 			free_cmd(cmd);
-		} else if (0xd4 == hdr->type) {
-			if (!suppress_ack) {
-				wctc4xxp_send_ack(wc, hdr->seq_num,
-						  hdr->channel);
-			}
-			if (hdr->params[0] != le16_to_cpu(0xffff)) {
+		} else if (0xd4 == c->type) {
+			if (c->params[0] != le16_to_cpu(0xffff)) {
 				dev_warn(&wc->pdev->dev,
 				   "DTE Failed self test (%04x).\n",
-				   le16_to_cpu(hdr->params[0]));
-			} else if ((hdr->params[1] != le16_to_cpu(0x000c)) &&
-				(hdr->params[1] != le16_to_cpu(0x010c))) {
+				   le16_to_cpu(c->params[0]));
+			} else if ((c->params[1] != le16_to_cpu(0x000c)) &&
+				(c->params[1] != le16_to_cpu(0x010c))) {
 				dev_warn(&wc->pdev->dev,
 				   "Unexpected ERAM status (%04x).\n",
-				   le16_to_cpu(hdr->params[1]));
+				   le16_to_cpu(c->params[1]));
 			} else {
 				wctc4xxp_set_ready(wc);
 				wake_up(&wc->waitq);
 			}
 			free_cmd(cmd);
-		} else if (MONITOR_LIVE_INDICATION_TYPE == hdr->type) {
-			if (!suppress_ack) {
-				wctc4xxp_send_ack(wc, hdr->seq_num,
-						  hdr->channel);
-			}
-			dev_warn(&wc->pdev->dev,
-				 "Received diagnostic message:\n");
-			print_command(wc, cmd);
+		} else if (MONITOR_LIVE_INDICATION_TYPE == c->type) {
+			handle_csm_alert(wc, hdr);
 			free_cmd(cmd);
 		} else {
-			if (!suppress_ack) {
-				wctc4xxp_send_ack(wc, hdr->seq_num,
-						  hdr->channel);
-			}
 			dev_warn(&wc->pdev->dev,
-			  "Unknown command type received. %02x\n", hdr->type);
+				 "Unknown command type received. %02x\n",
+				 c->type);
 			free_cmd(cmd);
 		}
 	} else {
@@ -2431,6 +2638,7 @@ queue_rtp_packet(struct wcdte *wc, struct tcb *cmd)
 	struct channel_pvt *cpvt;
 	struct rtp_packet *packet = cmd->data;
 	unsigned long flags;
+	long samples;
 
 	if (unlikely(ip_fast_csum((void *)(&packet->iphdr),
 		packet->iphdr.ihl))) {
@@ -2467,7 +2675,16 @@ queue_rtp_packet(struct wcdte *wc, struct tcb *cmd)
 	}
 
 	cpvt = dtc->pvt;
+	if (!dahdi_tc_is_busy(dtc)) {
+		free_cmd(cmd);
+		return;
+	}
+
 	spin_lock_irqsave(&cpvt->lock, flags);
+	samples = wctc4xxp_bytes_to_samples(dtc->dstfmt,
+			be16_to_cpu(packet->udphdr.len) -
+			sizeof(struct rtphdr) - sizeof(struct udphdr));
+	cpvt->samples_in_flight = max(cpvt->samples_in_flight - samples, 0L);
 	list_add_tail(&cmd->node, &cpvt->rx_queue);
 	dahdi_tc_set_data_waiting(dtc);
 	spin_unlock_irqrestore(&cpvt->lock, flags);
@@ -2475,62 +2692,40 @@ queue_rtp_packet(struct wcdte *wc, struct tcb *cmd)
 	return;
 }
 
-static inline void
-wctc4xxp_receiveprep(struct wcdte *wc, struct tcb *cmd)
-{
-	const struct ethhdr *ethhdr = (const struct ethhdr *)(cmd->data);
-
-	if (cpu_to_be16(ETH_P_IP) == ethhdr->h_proto) {
-		queue_rtp_packet(wc, cmd);
-	} else if (cpu_to_be16(ETH_P_CSM_ENCAPS) == ethhdr->h_proto) {
-		receive_csm_encaps_packet(wc, cmd);
-	} else {
-		DTE_DEBUG(DTE_DEBUG_GENERAL,
-		   "Unknown packet protocol received: %04x.\n",
-		   be16_to_cpu(ethhdr->h_proto));
-		free_cmd(cmd);
-	}
-}
-
 static void service_tx_ring(struct wcdte *wc)
 {
 	struct tcb *cmd;
 	unsigned long flags;
+	spin_lock_irqsave(&wc->cmd_list_lock, flags);
 	while ((cmd = wctc4xxp_retrieve(wc->txd))) {
-		spin_lock_irqsave(&cmd->lock, flags);
 		cmd->flags |= TX_COMPLETE;
-		if (!(cmd->flags & (__WAIT_FOR_ACK | __WAIT_FOR_RESPONSE))) {
+		if (!(cmd->flags & (WAIT_FOR_ACK | WAIT_FOR_RESPONSE))) {
 			/* If we're not waiting for an ACK or Response from
 			 * the DTE, this message should not be sitting on any
 			 * lists. */
 			WARN_ON(!list_empty(&cmd->node));
-			if (DO_NOT_AUTO_FREE & cmd->flags) {
-				spin_unlock_irqrestore(&cmd->lock, flags);
+			if (cmd->complete) {
 				WARN_ON(!(cmd->flags & TX_COMPLETE));
-				complete(&cmd->complete);
+				complete(cmd->complete);
 			} else {
-				spin_unlock_irqrestore(&cmd->lock, flags);
 				free_cmd(cmd);
 			}
-		} else {
-			spin_unlock_irqrestore(&cmd->lock, flags);
 		}
 
 		/* We've freed up a spot in the hardware ring buffer.  If
 		 * another packet is queued up, let's submit it to the
 		 * hardware. */
-		spin_lock_irqsave(&wc->cmd_list_lock, flags);
 		if (!list_empty(&wc->cmd_list)) {
 			cmd = list_entry(wc->cmd_list.next, struct tcb, node);
 			list_del_init(&cmd->node);
-		} else {
-			cmd = NULL;
+			if (cmd->flags & (WAIT_FOR_ACK | WAIT_FOR_RESPONSE)) {
+				list_add_tail(&cmd->node,
+					      &wc->waiting_for_response_list);
+			}
+			wctc4xxp_submit(wc->txd, cmd);
 		}
-		spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
-
-		if (cmd)
-			wctc4xxp_transmit_cmd(wc, cmd);
 	}
+	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
 }
 
 static void service_rx_ring(struct wcdte *wc)
@@ -2546,11 +2741,23 @@ static void service_rx_ring(struct wcdte *wc)
 	 * Process the received packets
 	 */
 	while (!list_empty(&local_list)) {
+		const struct ethhdr *ethhdr;
+
 		cmd = container_of(local_list.next, struct tcb, node);
+		ethhdr = (const struct ethhdr *)(cmd->data);
 		list_del_init(&cmd->node);
 
 		wctc4xxp_net_capture_cmd(wc, cmd);
-		wctc4xxp_receiveprep(wc, cmd);
+		if (cpu_to_be16(ETH_P_IP) == ethhdr->h_proto) {
+			queue_rtp_packet(wc, cmd);
+		} else if (cpu_to_be16(ETH_P_CSM_ENCAPS) == ethhdr->h_proto) {
+			receive_csm_encaps_packet(wc, cmd);
+		} else {
+			DTE_DEBUG(DTE_DEBUG_GENERAL,
+			   "Unknown packet protocol received: %04x.\n",
+			   be16_to_cpu(ethhdr->h_proto));
+			free_cmd(cmd);
+		}
 	}
 	wctc4xxp_receive_demand_poll(wc);
 }
@@ -2564,39 +2771,39 @@ static void deferred_work_func(struct work_struct *work)
 {
 	struct wcdte *wc = container_of(work, struct wcdte, deferred_work);
 #endif
-	service_tx_ring(wc);
 	service_rx_ring(wc);
 }
 
 DAHDI_IRQ_HANDLER(wctc4xxp_interrupt)
 {
 	struct wcdte *wc = dev_id;
+	bool packets_to_process = false;
 	u32 ints;
-	u32 reg;
+#define NORMAL_INTERRUPT_SUMMARY (1<<16)
+#define ABNORMAL_INTERRUPT_SUMMARY (1<<15)
+
 #define TX_COMPLETE_INTERRUPT 0x00000001
 #define RX_COMPLETE_INTERRUPT 0x00000040
-#define NORMAL_INTERRUPTS (TX_COMPLETE_INTERRUPT | RX_COMPLETE_INTERRUPT)
+#define TIMER_INTERRUPT	      (1<<11)
+#define NORMAL_INTERRUPTS (TX_COMPLETE_INTERRUPT | RX_COMPLETE_INTERRUPT | \
+			   TIMER_INTERRUPT)
 
 	/* Read and clear interrupts */
 	ints = __wctc4xxp_getctl(wc, 0x0028);
 
-	ints &= wc->intmask;
-
-	if (!ints)
+	if (!(ints & (NORMAL_INTERRUPT_SUMMARY|ABNORMAL_INTERRUPT_SUMMARY)))
 		return IRQ_NONE;
 
-	if (likely(ints & NORMAL_INTERRUPTS)) {
-		reg = 0;
-		if (ints & TX_COMPLETE_INTERRUPT)
-			reg |= TX_COMPLETE_INTERRUPT;
+	/* Clear all the pending interrupts. */
+	__wctc4xxp_setctl(wc, 0x0028, ints);
 
-		if (ints & RX_COMPLETE_INTERRUPT) {
-			wctc4xxp_handle_receive_ring(wc);
-			reg |= RX_COMPLETE_INTERRUPT;
-		}
+	if (ints & (RX_COMPLETE_INTERRUPT | TIMER_INTERRUPT)) {
+		packets_to_process = wctc4xxp_handle_receive_ring(wc) > 0;
+		service_tx_ring(wc);
 
 #if DEFERRED_PROCESSING == WORKQUEUE
-		schedule_work(&wc->deferred_work);
+		if (packets_to_process)
+			schedule_work(&wc->deferred_work);
 #elif DEFERRED_PROCESSING == INTERRUPT
 #error "You will need to change the locks if you want to run the processing " \
 		"in the interrupt handler."
@@ -2604,13 +2811,12 @@ DAHDI_IRQ_HANDLER(wctc4xxp_interrupt)
 #error "Define a deferred processing function in kernel/wctc4xxp/wctc4xxp.h"
 #endif
 
-		__wctc4xxp_setctl(wc, 0x0028, reg);
 	} else {
 		if ((ints & 0x00008000) && debug)
 			dev_info(&wc->pdev->dev, "Abnormal Interrupt.\n");
 
-		if ((ints & 0x00002000) && debug)
-			dev_info(&wc->pdev->dev, "Fatal Bus Error INT\n");
+		if (ints & 0x00002000)
+			dev_err(&wc->pdev->dev, "Fatal Bus Error Detected.\n");
 
 		if ((ints & 0x00000100) && debug)
 			dev_info(&wc->pdev->dev, "Receive Stopped INT\n");
@@ -2631,9 +2837,6 @@ DAHDI_IRQ_HANDLER(wctc4xxp_interrupt)
 			dev_info(&wc->pdev->dev,
 				 "Transmit Processor Stopped INT\n");
 		}
-
-		/* Clear all the pending interrupts. */
-		__wctc4xxp_setctl(wc, 0x0028, ints);
 	}
 	return IRQ_HANDLED;
 }
@@ -2642,31 +2845,42 @@ static int
 wctc4xxp_hardware_init(struct wcdte *wc)
 {
 	/* Hardware stuff */
+	enum {
+		/* Software Reset */
+		SWR		= (1 << 0),
+		/* Bus Arbitration (1 for priority transmit) */
+		BAR		= (1 << 1),
+		/* Memory Write Invalidate */
+		MWI		= (1 << 24),
+		/* Memory Read Line */
+		MRL		= (1 << 23),
+		/* Descriptor Skip Length */
+		DSLShift	= 2,
+		/* Cache Alignment */
+		CALShift	= 14,
+		/* Transmit Auto Pollling */
+		TAPShift	= 17,
+	};
 	u32 reg;
 	unsigned long newjiffies;
 	u8 cache_line_size;
-	const u32 DEFAULT_PCI_ACCESS = 0xfff80000;
-
-	/* Enable I/O Access */
-	pci_read_config_dword(wc->pdev, 0x0004, &reg);
-	reg |= 0x00000007;
-	pci_write_config_dword(wc->pdev, 0x0004, reg);
+	const u32 DEFAULT_PCI_ACCESS = (MWI | (11 << TAPShift));
 
 	if (pci_read_config_byte(wc->pdev, 0x0c, &cache_line_size))
 		return -EIO;
 
 	switch (cache_line_size) {
 	case 0x08:
-		reg = DEFAULT_PCI_ACCESS | (0x1 << 14);
+		reg = DEFAULT_PCI_ACCESS | (0x1 << CALShift);
 		break;
 	case 0x10:
-		reg = DEFAULT_PCI_ACCESS | (0x2 << 14);
+		reg = DEFAULT_PCI_ACCESS | (0x2 << CALShift);
 		break;
 	case 0x20:
-		reg = DEFAULT_PCI_ACCESS | (0x3 << 14);
+		reg = DEFAULT_PCI_ACCESS | (0x3 << CALShift);
 		break;
 	default:
-		reg = 0xfe584202;
+		reg = (11 << TAPShift);
 		break;
 	}
 
@@ -2683,7 +2897,7 @@ wctc4xxp_hardware_init(struct wcdte *wc)
 	wctc4xxp_setctl(wc, 0x0000, reg | 0x60000);
 
 	/* Configure watchdogs, access, etc */
-	wctc4xxp_setctl(wc, 0x0030, 0x00280040);
+	wctc4xxp_setctl(wc, 0x0030, 0x00280048);
 	wctc4xxp_setctl(wc, 0x0078, 0x00000013);
 	reg = wctc4xxp_getctl(wc, 0x00fc);
 	wctc4xxp_setctl(wc, 0x00fc, (reg & ~0x7) | 0x7);
@@ -2699,7 +2913,7 @@ wctc4xxp_start_dma(struct wcdte *wc)
 	u32 reg;
 	struct tcb *cmd;
 
-	for (i = 0; i < DRING_SIZE; ++i) {
+	for (i = 0; i < wc->rxd->size; ++i) {
 		cmd = alloc_cmd(SFRAME_SIZE);
 		if (!cmd) {
 			WARN_ALWAYS();
@@ -2865,6 +3079,7 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 	unsigned int byteloc;
 	unsigned int length;
 	struct tcb *cmd;
+	DECLARE_COMPLETION_ONSTACK(done);
 
 	byteloc = 17;
 
@@ -2876,6 +3091,8 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 	wctc4xxp_enable_polling(wc);
 #endif
 
+	clear_bit(DTE_READY, &wc->flags);
+
 	while (byteloc < (firmware->size-20)) {
 		length = (firmware->data[byteloc] << 8) |
 				firmware->data[byteloc+1];
@@ -2885,8 +3102,9 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 		memcpy(cmd->data, &firmware->data[byteloc], length);
 		byteloc += length;
 		cmd->flags = WAIT_FOR_ACK;
+		cmd->complete = &done;
 		wctc4xxp_transmit_cmd(wc, cmd);
-		wait_for_completion(&cmd->complete);
+		wait_for_completion(&done);
 		if (cmd->flags & DTE_CMD_TIMEOUT) {
 			free_cmd(cmd);
 			dev_err(&wc->pdev->dev, "Failed to load firmware.\n");
@@ -2921,8 +3139,7 @@ wctc4xxp_turn_off_booted_led(struct wcdte *wc)
 	DTE_DEBUG(DTE_DEBUG_GENERAL, "PHY register 0 = %X\n",
 	   wctc4xxp_read_phy(wc, 0));
 
-	/* Set reset */
-	wctc4xxp_setctl(wc, 0x00A0, 0x04000000);
+	wctc4xxp_reset_processor(wc);
 
 	/* Wait 4 ms to ensure processor reset */
 	msleep(4);
@@ -2957,7 +3174,6 @@ wctc4xxp_boot_processor(struct wcdte *wc, const struct firmware *firmware)
 	int ret;
 
 	wctc4xxp_turn_off_booted_led(wc);
-
 	ret = wctc4xxp_load_firmware(wc, firmware);
 	if (ret)
 		return ret;
@@ -2968,20 +3184,104 @@ wctc4xxp_boot_processor(struct wcdte *wc, const struct firmware *firmware)
 	return 0;
 }
 
-static int
+static void
 setup_half_channel(struct channel_pvt *pvt, struct tcb *cmd, u16 length)
 {
-	if (send_set_ip_hdr_channel_cmd(pvt, cmd))
-		return -EIO;
-	if (send_voip_vceopt_cmd(pvt, cmd, length))
-		return -EIO;
-	if (send_voip_tonectl_cmd(pvt, cmd))
-		return -EIO;
-	if (send_voip_dtmfopt_cmd(pvt, cmd))
-		return -EIO;
-	if (send_voip_indctrl_cmd(pvt, cmd))
-		return -EIO;
-	return 0;
+	setup_channel_header(pvt, cmd);
+
+	append_set_ip_hdr_channel_cmd(cmd);
+	append_voip_vceopt_cmd(cmd, length);
+	append_voip_tonectl_cmd(cmd);
+	append_voip_dtmfopt_cmd(cmd);
+	append_voip_indctrl_cmd(cmd);
+
+	/* To indicate the end of multiple messages. */
+	cmd->data_len += 4;
+	WARN_ON(cmd->data_len >= SFRAME_SIZE);
+
+	wctc4xxp_transmit_cmd(pvt->wc, cmd);
+}
+
+static int wctc4xxp_setup_channels(struct wcdte *wc,
+				   struct channel_pvt *encoder_pvt,
+				   struct channel_pvt *decoder_pvt,
+				   u16 length)
+{
+	int res = 0;
+	struct tcb *encoder_cmd;
+	struct tcb *decoder_cmd;
+	DECLARE_COMPLETION_ONSTACK(encoder_done);
+	DECLARE_COMPLETION_ONSTACK(decoder_done);
+
+	encoder_cmd = alloc_cmd(SFRAME_SIZE);
+	decoder_cmd = alloc_cmd(SFRAME_SIZE);
+
+	if (!encoder_cmd || !decoder_cmd) {
+		res = -ENOMEM;
+		goto error_exit;
+	}
+
+	encoder_cmd->complete = &encoder_done;
+	decoder_cmd->complete = &decoder_done;
+
+	setup_half_channel(encoder_pvt, encoder_cmd, length);
+	setup_half_channel(decoder_pvt, decoder_cmd, length);
+
+	wait_for_completion(&decoder_done);
+	wait_for_completion(&encoder_done);
+
+	if (encoder_cmd->flags & DTE_CMD_TIMEOUT ||
+	    decoder_cmd->flags & DTE_CMD_TIMEOUT) {
+		DTE_DEBUG(DTE_DEBUG_GENERAL, "Timeout waiting for command.\n");
+		res = -EIO;
+	}
+
+	if ((0x0000 != response_header(encoder_cmd)->cmd.params[0]) ||
+	    (0x0000 != response_header(encoder_cmd)->cmd.params[0]))
+		res = -EIO;
+
+error_exit:
+	free_cmd(encoder_cmd);
+	free_cmd(decoder_cmd);
+	return res;
+}
+
+static int wctc4xxp_enable_channels(struct wcdte *wc,
+				    struct channel_pvt *encoder_pvt,
+				    struct channel_pvt *decoder_pvt,
+				    u8 complicated, u8 simple)
+{
+	int res = 0;
+	struct tcb *encoder_cmd;
+	struct tcb *decoder_cmd;
+	DECLARE_COMPLETION_ONSTACK(encoder_done);
+	DECLARE_COMPLETION_ONSTACK(decoder_done);
+
+	encoder_cmd = alloc_cmd(SFRAME_SIZE);
+	decoder_cmd = alloc_cmd(SFRAME_SIZE);
+
+	if (!encoder_cmd || !decoder_cmd) {
+		res = -ENOMEM;
+		goto error_exit;
+	}
+
+	encoder_cmd->complete = &encoder_done;
+	decoder_cmd->complete = &decoder_done;
+
+	send_voip_vopena_cmd(encoder_pvt, encoder_cmd, complicated);
+	send_voip_vopena_cmd(decoder_pvt, decoder_cmd, simple);
+
+	wait_for_completion(&decoder_done);
+	wait_for_completion(&encoder_done);
+
+	if ((0x0000 != response_header(encoder_cmd)->cmd.params[0]) ||
+	    (0x0000 != response_header(decoder_cmd)->cmd.params[0]))
+		res = -EIO;
+
+error_exit:
+	free_cmd(encoder_cmd);
+	free_cmd(decoder_cmd);
+	return res;
 }
 
 static int
@@ -2991,8 +3291,8 @@ wctc4xxp_create_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt,
 	struct channel_pvt *encoder_pvt, *decoder_pvt;
 	u16 encoder_timeslot, decoder_timeslot;
 	u16 encoder_channel, decoder_channel;
-	u16 length;
 	struct tcb *cmd;
+	u16 length;
 
 	cmd = alloc_cmd(SFRAME_SIZE);
 	if (!cmd)
@@ -3011,12 +3311,18 @@ wctc4xxp_create_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt,
 		complicated = temp;
 	}
 
+	length = (DTE_FORMAT_G729A == complicated) ? G729_LENGTH :
+		(DTE_FORMAT_G723_1 == complicated) ? G723_LENGTH : 0;
+
+
 	BUG_ON(encoder_timeslot/2 >= wc->numchannels);
 	BUG_ON(decoder_timeslot/2 >= wc->numchannels);
 	encoder_pvt = wc->uencode->channels[encoder_timeslot/2].pvt;
 	decoder_pvt = wc->udecode->channels[decoder_timeslot/2].pvt;
 	BUG_ON(!encoder_pvt);
 	BUG_ON(!decoder_pvt);
+	encoder_pvt->last_rx_seq_num = 0xff;
+	decoder_pvt->last_rx_seq_num = 0xff;
 
 	WARN_ON(encoder_timeslot == decoder_timeslot);
 	/* First, let's create two channels, one for the simple -> complex
@@ -3033,28 +3339,23 @@ wctc4xxp_create_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt,
 	   "DTE is using the following channels encoder_channel: " \
 	   "%d decoder_channel: %d\n", encoder_channel, decoder_channel);
 
-	length = (DTE_FORMAT_G729A == complicated) ? G729_LENGTH :
-		(DTE_FORMAT_G723_1 == complicated) ? G723_LENGTH : 0;
-
 	WARN_ON(encoder_channel == decoder_channel);
 	/* Now set all the default parameters for the encoder. */
 	encoder_pvt->chan_in_num = encoder_channel;
 	encoder_pvt->chan_out_num = decoder_channel;
-	if (setup_half_channel(encoder_pvt, cmd, length))
-		goto error_exit;
 
-	/* And likewise for the decoder. */
 	decoder_pvt->chan_in_num = decoder_channel;
 	decoder_pvt->chan_out_num = encoder_channel;
-	if (setup_half_channel(decoder_pvt, cmd, length))
+
+	if (wctc4xxp_setup_channels(wc, encoder_pvt, decoder_pvt, length))
 		goto error_exit;
 
 	if (send_trans_connect_cmd(wc, cmd, encoder_channel,
 		decoder_channel, complicated, simple))
 		goto error_exit;
-	if (send_voip_vopena_cmd(encoder_pvt, cmd, complicated))
-		goto error_exit;
-	if (send_voip_vopena_cmd(decoder_pvt, cmd, simple))
+
+	if (wctc4xxp_enable_channels(wc, encoder_pvt, decoder_pvt,
+				     complicated, simple))
 		goto error_exit;
 
 	DTE_DEBUG(DTE_DEBUG_CHANNEL_SETUP,
@@ -3066,6 +3367,94 @@ wctc4xxp_create_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt,
 error_exit:
 	free_cmd(cmd);
 	return -EIO;
+}
+
+static void print_vceinfo_packet(struct wcdte *wc, struct tcb *cmd)
+{
+	int i;
+	struct device *const dev = &wc->pdev->dev;
+
+	static const struct {
+		const char *name;
+		bool show;
+	} PARAMETERS[] = {
+		{ "Format Revision                                   ", false},
+		{ "Reserved                                          ", false},
+		{ "Call Timer (seconds)                              ", false},
+		{ "Current Playout Delay [to PCM]                    ", false},
+		{ "Minimum Playout Delay [to PCM]                    ", false},
+		{ "Maximum Playout Delay [to PCM]                    ", false},
+		{ "Clock Offset                                      ", false},
+		{ "PeakJitter (ms)                                   ", true},
+		{ "Interpolative Concealment [to PCM]                ", false},
+		{ "Silence Concealment [to PCM]                      ", false},
+		{ "Jitter Buffer Overflow Discard [from IP]          ", true},
+		{ "End-point Detection Errors                        ", true},
+		{ "Number of Tx Voice Packets [to IP]                ", true},
+		{ "Number of Tx Signalling Packets [to IP]           ", true},
+		{ "Number of Tx Comfort Noise Packets [to IP]        ", true},
+		{ "Total Transmit Duration [to IP]                   ", true},
+		{ "Voice Transmit Duration [to IP]                   ", true},
+		{ "Number of Rx Voice Packets [from IP]              ", true},
+		{ "Number of Rx Signalling Packets [from IP]         ", true},
+		{ "Number of Rx Comfort Noise Packets [from IP]      ", true},
+		{ "Total Receive Duration [from IP]                  ", true},
+		{ "Voice Receive Duration [from IP]                  ", true},
+		{ "Packets Out of Sequence [from IP]                 ", true},
+		{ "Bad Protocol Headers [from IP]                    ", true},
+		{ "Late Packets [from IP]                            ", true},
+		{ "Reserved (Early Packets) always zero              ", false},
+		{ "Number of Rx Voice bytes                          ", true},
+		{ "Number of Lost Packets [from IP]                  ", true},
+		{ "Current Transmit Power [from PCM]                 ", false},
+		{ "Mean Transmit Power [from PCM]                    ", false},
+		{ "Current Receive Power [to PCM]                    ", false},
+		{ "Mean Receive Power [to PCM]                       ", false},
+		{ "Background Noise [to PCM]                         ", false},
+		{ "ERL Level [to PCM]                                ", false},
+		{ "ACOM Level [from PCM]                             ", false},
+		{ "Current Transmit Activity [from PCM]              ", false},
+		{ "Current Receive Activity [to PCM]                 ", false},
+		{ "Discarded Unexpected Packets                      ", true},
+		{ "Discard Packets Due to Rx Disabled                ", true},
+		{ "Discarded Duplicate Packets                       ", true},
+		{ "Discarded Packets Due to Incorrect Payload Length ", true},
+		{ "Discarded Packets Due to Channel Inactive         ", true},
+		{ "Discarded Packets Due to Insufficient Memory      ", true}
+	};
+
+	u32 *parms = (u32 *)(&response_header(cmd)->cmd.params[0]);
+	for (i = 0; i < 43; ++i) {
+		if (PARAMETERS[i].show)
+			dev_info(dev, "%s%d\n", PARAMETERS[i].name, parms[i]);
+	}
+}
+
+static void print_eth_statistics_packet(struct wcdte *wc, struct tcb *cmd)
+{
+	int i;
+	struct device *const dev = &wc->pdev->dev;
+
+	static const struct {
+		const char *name;
+		bool show;
+	} PARAMETERS[] = {
+		{ "Format Revision                 ", true},
+		{ "Emitted Frames                  ", true},
+		{ "Received Frames                 ", true},
+		{ "Unknown Packet Type             ", true},
+		{ "Received Broadcast Packets      ", true},
+		{ "Unknown Broadcast               ", true},
+		{ "Emitted VLAN frames             ", true},
+		{ "Received VLAN frames            ", true},
+		{ "Received VLAN frames with E-RIF ", true}
+	};
+
+	u32 *parms = (u32 *)(&response_header(cmd)->cmd.params[0]);
+	for (i = 0; i < sizeof(PARAMETERS)/sizeof(PARAMETERS[0]); ++i) {
+		if (PARAMETERS[i].show)
+			dev_info(dev, "%s%d\n", PARAMETERS[i].name, parms[i]);
+	}
 }
 
 static int
@@ -3104,6 +3493,26 @@ wctc4xxp_destroy_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt)
 	encoder_pvt = dtc1->pvt;
 	decoder_pvt = dtc2->pvt;
 
+	if (debug & DTE_DEBUG_ETH_STATS) {
+		if (send_voip_vceinfo_cmd(encoder_pvt, cmd))
+			goto error_exit;
+		dev_warn(&wc->pdev->dev,
+			 "****************************************\n");
+		dev_warn(&wc->pdev->dev,
+			 "Encoder stats (ch: %d):\n",
+			 encoder_pvt->timeslot_in_num);
+		print_vceinfo_packet(wc, cmd);
+
+		if (send_voip_vceinfo_cmd(decoder_pvt, cmd))
+			goto error_exit;
+		dev_warn(&wc->pdev->dev,
+			 "****************************************\n");
+		dev_warn(&wc->pdev->dev,
+			 "Decoder stats (ch: %d):\n",
+			 decoder_pvt->timeslot_in_num);
+		print_vceinfo_packet(wc, cmd);
+	}
+
 	if (send_voip_vopena_close_cmd(encoder_pvt, cmd))
 		goto error_exit;
 	if (send_voip_vopena_close_cmd(decoder_pvt, cmd))
@@ -3115,6 +3524,15 @@ wctc4xxp_destroy_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt)
 	if (send_destroy_channel_cmd(wc, cmd, chan2))
 		goto error_exit;
 
+	if (debug & DTE_DEBUG_ETH_STATS) {
+		if (send_eth_statistics_cmd(wc, cmd))
+			goto error_exit;
+		print_eth_statistics_packet(wc, cmd);
+		dev_info(&wc->pdev->dev, "AN983 tx packets: %d rx packets: %d\n",
+			 wctc4xxp_get_packet_count(wc->txd),
+			 wctc4xxp_get_packet_count(wc->rxd));
+	}
+
 	free_cmd(cmd);
 	return 0;
 error_exit:
@@ -3123,8 +3541,7 @@ error_exit:
 }
 
 
-static int
-__wctc4xxp_setup_channels(struct wcdte *wc)
+static int wctc4xxp_setup_device(struct wcdte *wc)
 {
 	struct tcb *cmd;
 	int tdm_bus;
@@ -3171,6 +3588,9 @@ __wctc4xxp_setup_channels(struct wcdte *wc)
 	if (send_spu_features_control_cmd(wc, cmd, 0x04))
 		goto error_exit;
 
+	if (send_csme_multi_cmd(wc, cmd))
+		goto error_exit;
+
 	if (send_tdm_opt_cmd(wc, cmd))
 		goto error_exit;
 
@@ -3179,22 +3599,6 @@ __wctc4xxp_setup_channels(struct wcdte *wc)
 error_exit:
 	free_cmd(cmd);
 	return -1;
-}
-
-static int
-wctc4xxp_setup_channels(struct wcdte *wc)
-{
-	int ret;
-#ifndef DEBUG_WCTC4XXP
-	down(&wc->chansem);
-#else
-	if (down_interruptible(&wc->chansem))
-		return -EINTR;
-#endif
-	ret = __wctc4xxp_setup_channels(wc);
-	up(&wc->chansem);
-
-	return ret;
 }
 
 static void wctc4xxp_setup_file_operations(struct file_operations *fops)
@@ -3289,60 +3693,65 @@ wctc4xxp_watchdog(unsigned long data)
 	LIST_HEAD(cmds_to_retry);
 	const int MAX_RETRIES = 5;
 	int reschedule_timer = 0;
+	unsigned long flags;
 
 	service_tx_ring(wc);
 
-	spin_lock(&wc->cmd_list_lock);
+	spin_lock_irqsave(&wc->cmd_list_lock, flags);
 	/* Go through the list of messages that are waiting for responses from
 	 * the DTE, and complete or retry any that have timed out. */
 	list_for_each_entry_safe(cmd, temp,
 		&wc->waiting_for_response_list, node) {
-		if (time_after(jiffies, cmd->timeout)) {
-			if (++cmd->retries > MAX_RETRIES) {
-				if (!(cmd->flags & TX_COMPLETE)) {
 
-					cmd->flags |= DTE_CMD_TIMEOUT;
-					list_del_init(&cmd->node);
-					complete(&cmd->complete);
+		if (!time_after(jiffies, cmd->timeout))
+			continue;
 
-					set_bit(DTE_SHUTDOWN, &wc->flags);
-					spin_unlock(&wc->cmd_list_lock);
-					_wctc4xxp_stop_dma(wc);
-					dev_err(&wc->pdev->dev,
-					  "Board malfunctioning.  " \
-					  "Halting operation.\n");
-					reschedule_timer = 0;
-					spin_lock(&wc->cmd_list_lock);
-					break;
-				}
-				/* ERROR:  We've retried the command and
-				 * haven't received the ACK or the response.
-				 */
+		if (++cmd->retries > MAX_RETRIES) {
+			if (!(cmd->flags & TX_COMPLETE)) {
+
 				cmd->flags |= DTE_CMD_TIMEOUT;
 				list_del_init(&cmd->node);
-				complete(&cmd->complete);
-			} else if (cmd->flags & TX_COMPLETE) {
-				/* Move this to the local list because we're
-				 * going to resend it once we free the locks
-				 */
-				list_move_tail(&cmd->node, &cmds_to_retry);
-				cmd->flags &= ~(TX_COMPLETE);
-			} else {
-				/* The command is still sitting on the tx
-				 * descriptor ring.  We don't want to move it
-				 * off any lists, lets just reset the timeout
-				 * and tell the hardware to look for another
-				 * command . */
-				dev_warn(&wc->pdev->dev,
-				  "Retrying command that was " \
-				  "still on descriptor list.\n");
-				cmd->timeout = jiffies + HZ/4;
-				wctc4xxp_transmit_demand_poll(wc);
-				reschedule_timer = 1;
+				if (cmd->complete)
+					complete(cmd->complete);
+
+				wctc4xxp_reset_processor(wc);
+				set_bit(DTE_SHUTDOWN, &wc->flags);
+				spin_unlock_irqrestore(&wc->cmd_list_lock,
+						       flags);
+				_wctc4xxp_stop_dma(wc);
+				dev_err(&wc->pdev->dev,
+				  "Board malfunctioning. Halting operation.\n");
+				reschedule_timer = 0;
+				spin_lock_irqsave(&wc->cmd_list_lock, flags);
+				break;
 			}
+			/* ERROR:  We've retried the command and
+			 * haven't received the ACK or the response.
+			 */
+			cmd->flags |= DTE_CMD_TIMEOUT;
+			list_del_init(&cmd->node);
+			if (cmd->complete)
+				complete(cmd->complete);
+		} else if (cmd->flags & TX_COMPLETE) {
+			/* Move this to the local list because we're
+			 * going to resend it once we free the locks
+			 */
+			list_move_tail(&cmd->node, &cmds_to_retry);
+			cmd->flags &= ~(TX_COMPLETE);
+		} else {
+			/* The command is still sitting on the tx
+			 * descriptor ring.  We don't want to move it
+			 * off any lists, lets just reset the timeout
+			 * and tell the hardware to look for another
+			 * command . */
+			dev_warn(&wc->pdev->dev,
+			  "Retrying command that was still on descriptor list.\n");
+			cmd->timeout = jiffies + HZ/4;
+			wctc4xxp_transmit_demand_poll(wc);
+			reschedule_timer = 1;
 		}
 	}
-	spin_unlock(&wc->cmd_list_lock);
+	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
 
 	if (list_empty(&cmds_to_retry) && reschedule_timer)
 		mod_timer(&wc->watchdog, jiffies + HZ/2);
@@ -3399,6 +3808,130 @@ static struct wctc4xxp_desc wctce400 = {
 	.long_name = "Wildcard TCE400+TC400M",
 };
 
+static void wctc4xxp_cleanup_channels(struct wcdte *wc);
+
+static int wctc4xxp_reset_and_reload_firmware(struct wcdte *wc,
+					      const struct firmware *firmware)
+{
+	int res;
+
+	wctc4xxp_cleanup_command_list(wc);
+	wctc4xxp_cleanup_channels(wc);
+
+	res = wctc4xxp_boot_processor(wc, firmware);
+	if (res)
+		return res;
+
+#if defined(CONFIG_WCTC4XXP_POLLING)
+	wctc4xxp_enable_polling(wc);
+#endif
+	res = wctc4xxp_setup_device(wc);
+	if (res) {
+		dev_err(&wc->pdev->dev, "Failed to setup DTE\n");
+		return res;
+	}
+
+	return 0;
+}
+
+static int wctc4xxp_reset_driver_state(struct wcdte *wc)
+{
+	int res;
+	struct firmware embedded_firmware;
+	unsigned long flags;
+	const struct firmware *firmware = &embedded_firmware;
+#if !defined(HOTPLUG_FIRMWARE)
+	extern void _binary_dahdi_fw_tc400m_bin_size;
+	extern u8 _binary_dahdi_fw_tc400m_bin_start[];
+	embedded_firmware.data = _binary_dahdi_fw_tc400m_bin_start;
+	embedded_firmware.size = (size_t) &_binary_dahdi_fw_tc400m_bin_size;
+#else
+	static const char tc400m_firmware[] = "dahdi-fw-tc400m.bin";
+
+	res = request_firmware(&firmware, tc400m_firmware, &wc->pdev->dev);
+	if (res || !firmware) {
+		dev_err(&wc->pdev->dev,
+		  "Firmware %s not available from userspace. (%d)\n",
+		  tc400m_firmware, res);
+		return res;
+	}
+#endif
+	res = wctc4xxp_reset_and_reload_firmware(wc, firmware);
+	if (firmware != &embedded_firmware)
+		release_firmware(firmware);
+	spin_lock_irqsave(&wc->rxd->lock, flags);
+	wc->rxd->packet_errors = 0;
+	spin_unlock_irqrestore(&wc->rxd->lock, flags);
+	return res;
+}
+
+#ifdef EXPORT_FOR_ALERT_ATTRIBUTE
+
+static ssize_t wctc4xxp_force_alert_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	int res;
+	unsigned int alert_type;
+	struct wcdte *wc = dev_get_drvdata(dev);
+	struct tcb *cmd  = alloc_cmd(SFRAME_SIZE);
+	u16 parameters[] = {0};
+	if (!cmd)
+		return -ENOMEM;
+
+	res = sscanf(buf, "%x", &alert_type);
+	if (1 != res) {
+		free_cmd(cmd);
+		return -EINVAL;
+	}
+
+	dev_info(&wc->pdev->dev, "Forcing alert type: 0x%x\n", alert_type);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 24)
+	mutex_lock(&wc->chanlock);
+#else
+	res = mutex_lock_killable(&wc->chanlock);
+	if (res) {
+		free_cmd(cmd);
+		return -EAGAIN;
+	}
+#endif
+
+
+	parameters[0] = alert_type;
+
+	create_supervisor_cmd(wc, cmd, CONFIG_CHANGE_TYPE,
+		CONFIG_DEVICE_CLASS, 0x0409, parameters,
+		ARRAY_SIZE(parameters));
+
+	wctc4xxp_transmit_cmd(wc, cmd);
+
+	mutex_unlock(&wc->chanlock);
+
+	return count;
+}
+
+static DEVICE_ATTR(force_alert, 0200, NULL, wctc4xxp_force_alert_store);
+
+static void wctc4xxp_create_sysfs_files(struct wcdte *wc)
+{
+	int ret;
+	ret = device_create_file(&wc->pdev->dev, &dev_attr_force_alert);
+	if (ret) {
+		dev_info(&wc->pdev->dev,
+			"Failed to create device attributes.\n");
+	}
+}
+
+static void wctc4xxp_remove_sysfs_files(struct wcdte *wc)
+{
+	device_remove_file(&wc->pdev->dev, &dev_attr_force_alert);
+}
+
+#else
+static inline void wctc4xxp_create_sysfs_files(struct wcdte *wc) { return; }
+static inline void wctc4xxp_remove_sysfs_files(struct wcdte *wc) { return; }
+#endif
+
 static int __devinit
 wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
@@ -3443,7 +3976,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		return -EIO;
 	}
 
-	sema_init(&wc->chansem, 1);
+	mutex_init(&wc->chanlock);
 	spin_lock_init(&wc->reglock);
 	spin_lock_init(&wc->cmd_list_lock);
 	spin_lock_init(&wc->rx_list_lock);
@@ -3463,6 +3996,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			pci_resource_len(wc->pdev, 1));
 		if (wc->iobase)
 			pci_iounmap(wc->pdev, wc->iobase);
+		pci_clear_mwi(wc->pdev);
 		dev_warn(&wc->pdev->dev, "No suitable DMA available.\n");
 		return -EIO;
 	}
@@ -3474,7 +4008,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	res = wctc4xxp_initialize_descriptor_ring(wc->pdev, wc->txd,
-		0xe0800000, DMA_TO_DEVICE);
+		0xe0800000, DMA_TO_DEVICE, DEFAULT_TX_DRING_SIZE);
 	if (res)
 		goto error_exit_swinit;
 
@@ -3485,7 +4019,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	res = wctc4xxp_initialize_descriptor_ring(wc->pdev, wc->rxd, 0,
-		DMA_FROM_DEVICE);
+		DMA_FROM_DEVICE, DEFAULT_RX_DRING_SIZE);
 	if (res)
 		goto error_exit_swinit;
 
@@ -3548,14 +4082,6 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	setup_timer(&wc->watchdog, wctc4xxp_watchdog, (unsigned long)wc);
 #	endif
 
-#	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
-	wc->polling.function = wctc4xxp_polling;
-	wc->polling.data = (unsigned long)wc;
-	init_timer(&wc->polling);
-#	else
-	setup_timer(&wc->polling, wctc4xxp_polling, (unsigned long)wc);
-#	endif
-
 	/* ------------------------------------------------------------------
 	 * Load the firmware and start the DTE.
 	 * --------------------------------------------------------------- */
@@ -3564,6 +4090,11 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (res) {
 		dev_err(&wc->pdev->dev, "Failed to enable device.\n");
 		goto error_exit_swinit;;
+	}
+	res = pci_set_mwi(wc->pdev);
+	if (res) {
+		dev_warn(&wc->pdev->dev,
+			 "Failed to set Memory-Write Invalidate Command Bit..\n");
 	}
 	pci_set_master(pdev);
 	pci_set_drvdata(pdev, wc);
@@ -3584,16 +4115,10 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 	wctc4xxp_enable_interrupts(wc);
 	wctc4xxp_start_dma(wc);
-	res = wctc4xxp_boot_processor(wc, firmware);
+
+	res = wctc4xxp_reset_and_reload_firmware(wc, firmware);
 	if (firmware != &embedded_firmware)
 		release_firmware(firmware);
-	if (res)
-		goto error_exit_hwinit;
-
-#if defined(CONFIG_WCTC4XXP_POLLING)
-	wctc4xxp_enable_polling(wc);
-#endif
-	res = wctc4xxp_setup_channels(wc);
 	if (res)
 		goto error_exit_hwinit;
 
@@ -3611,6 +4136,10 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	DTE_DEBUG(DTE_DEBUG_GENERAL, "Operating in DEBUG mode.\n");
 	dahdi_transcoder_register(wc->uencode);
 	dahdi_transcoder_register(wc->udecode);
+
+	wctc4xxp_match_packet_counts(wc);
+
+	wctc4xxp_create_sysfs_files(wc);
 
 	return 0;
 
@@ -3636,6 +4165,7 @@ error_exit_swinit:
 		pci_resource_len(wc->pdev, 1));
 	if (wc->iobase)
 		pci_iounmap(wc->pdev, wc->iobase);
+	pci_clear_mwi(wc->pdev);
 	wctc4xxp_remove_from_device_list(wc);
 	kfree(wc);
 	return res;
@@ -3645,13 +4175,29 @@ static void wctc4xxp_cleanup_channels(struct wcdte *wc)
 {
 	int i;
 	struct dahdi_transcoder_channel *dtc_en, *dtc_de;
+	struct channel_pvt *cpvt;
 
 	for (i = 0; i < wc->numchannels; ++i) {
 		dtc_en = &(wc->uencode->channels[i]);
 		wctc4xxp_cleanup_channel_private(wc, dtc_en);
+		dahdi_tc_clear_busy(dtc_en);
+		dahdi_tc_clear_built(dtc_en);
+
+		dtc_en->built_fmts = 0;
+		cpvt = dtc_en->pvt;
+		cpvt->chan_in_num = INVALID;
+		cpvt->chan_out_num = INVALID;
+
 
 		dtc_de = &(wc->udecode->channels[i]);
 		wctc4xxp_cleanup_channel_private(wc, dtc_de);
+		dahdi_tc_clear_busy(dtc_de);
+		dahdi_tc_clear_built(dtc_de);
+
+		dtc_de->built_fmts = 0;
+		cpvt = dtc_de->pvt;
+		cpvt->chan_in_num = INVALID;
+		cpvt->chan_out_num = INVALID;
 	}
 }
 
@@ -3662,6 +4208,8 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 	if (!wc)
 		return;
 
+	wctc4xxp_remove_sysfs_files(wc);
+
 	wctc4xxp_remove_from_device_list(wc);
 
 	set_bit(DTE_SHUTDOWN, &wc->flags);
@@ -3670,9 +4218,6 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 
 	/* This should already be stopped, but it doesn't hurt to make sure. */
 	clear_bit(DTE_POLLING, &wc->flags);
-	if (del_timer_sync(&wc->polling))
-		del_timer_sync(&wc->polling);
-
 	wctc4xxp_net_unregister(wc);
 
 	/* Stop any DMA */
@@ -3694,6 +4239,7 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 		pci_resource_len(wc->pdev, 1));
 	if (wc->iobase)
 		pci_iounmap(wc->pdev, wc->iobase);
+	pci_clear_mwi(wc->pdev);
 	wctc4xxp_cleanup_descriptor_ring(wc->txd);
 	kfree(wc->txd);
 	wctc4xxp_cleanup_descriptor_ring(wc->rxd);

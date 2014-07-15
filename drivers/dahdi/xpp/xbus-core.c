@@ -24,8 +24,10 @@
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
+#include <linux/mutex.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
 #ifdef	PROTOCOL_DEBUG
 #include <linux/ctype.h>
 #endif
@@ -59,8 +61,8 @@ static DEF_PARM(uint, command_queue_length, 1500, 0444,
 static DEF_PARM(uint, poll_timeout, 1000, 0644,
 		"Timeout (in jiffies) waiting for units to reply");
 static DEF_PARM_BOOL(rx_tasklet, 0, 0644, "Use receive tasklets");
-static DEF_PARM_BOOL(dahdi_autoreg, 0, 0644,
-		     "Register devices automatically (1) or not (0)");
+static DEF_PARM_BOOL(dahdi_autoreg, 0, 0444,
+		     "Register devices automatically (1) or not (0). UNUSED.");
 
 #ifdef	CONFIG_PROC_FS
 static const struct file_operations xbus_read_proc_ops;
@@ -78,7 +80,13 @@ static struct proc_dir_entry *proc_xbuses;
 
 static struct xbus_desc {
 	xbus_t *xbus;
+	int shutting_down;
 } xbuses_array[MAX_BUSES];
+
+static int xbus_is_shutting_down(int num)
+{
+	return xbuses_array[num].shutting_down;
+}
 
 static xbus_t *xbus_byhwid(const char *hwid)
 {
@@ -147,6 +155,8 @@ static void init_xbus(uint num, xbus_t *xbus)
 	BUG_ON(num >= ARRAY_SIZE(xbuses_array));
 	desc = &xbuses_array[num];
 	desc->xbus = xbus;
+	if (xbus)
+		desc->shutting_down = 0;
 }
 
 xbus_t *xbus_num(uint num)
@@ -186,9 +196,12 @@ static void finalize_xbuses_array(void)
 static void xbus_destroy(struct kref *kref)
 {
 	xbus_t *xbus;
+	int num;
 
 	xbus = kref_to_xbus(kref);
-	XBUS_NOTICE(xbus, "%s\n", __func__);
+	XBUS_DBG(DEVICES, xbus, "%s\n", __func__);
+	num = xbus->num;
+	xbuses_array[num].shutting_down = 1;
 	xbus_sysfs_remove(xbus);
 }
 
@@ -197,6 +210,11 @@ xbus_t *get_xbus(const char *msg, uint num)
 	unsigned long flags;
 	xbus_t *xbus;
 
+	if (xbus_is_shutting_down(num)) {
+		DBG(DEVICES, "%s(%s): XBUS-%d: shutting down\n", __func__,
+				msg, num);
+		return NULL;
+	}
 	spin_lock_irqsave(&xbuses_lock, flags);
 	xbus = xbus_num(num);
 	if (xbus != NULL) {
@@ -210,6 +228,13 @@ xbus_t *get_xbus(const char *msg, uint num)
 
 void put_xbus(const char *msg, xbus_t *xbus)
 {
+	if (xbus_is_shutting_down(xbus->num)) {
+		if (!refcount_xbus(xbus)) {
+			DBG(DEVICES, "%s(%s): XBUS-%d: shutting down\n",
+					__func__, msg, xbus->num);
+			return;
+		}
+	}
 	XBUS_DBG(DEVICES, xbus, "%s: refcount_xbus=%d\n", msg,
 		 refcount_xbus(xbus));
 	kref_put(&xbus->kref, xbus_destroy);
@@ -559,6 +584,14 @@ static void receive_tasklet_func(unsigned long data)
 void xbus_receive_xframe(xbus_t *xbus, xframe_t *xframe)
 {
 	BUG_ON(!xbus);
+	if (xbus_is_shutting_down(xbus->num)) {
+		static int rate_limit;
+
+		if ((rate_limit++ % 1000) == 0)
+			XBUS_NOTICE(xbus, "%s: during shutdown (%d)\n",
+					__func__, rate_limit);
+		return;
+	}
 	if (rx_tasklet) {
 		xframe_enqueue_recv(xbus, xframe);
 	} else {
@@ -937,6 +970,8 @@ static void xbus_free_ddev(xbus_t *xbus)
 	xbus->ddev = NULL;
 }
 
+static DEFINE_MUTEX(dahdi_registration_mutex);
+
 int xbus_register_dahdi_device(xbus_t *xbus)
 {
 	int i;
@@ -944,11 +979,20 @@ int xbus_register_dahdi_device(xbus_t *xbus)
 	int ret;
 
 	XBUS_DBG(DEVICES, xbus, "Entering %s\n", __func__);
-	if (xbus_is_registered(xbus)) {
-		XBUS_ERR(xbus, "Already registered to DAHDI\n");
-		WARN_ON(1);
-		ret = -EINVAL;
+	ret = mutex_lock_interruptible(&dahdi_registration_mutex);
+	if (ret < 0) {
+		XBUS_ERR(xbus, "dahdi_registration_mutex already taken\n");
 		goto err;
+	}
+	if (xbus_is_registered(xbus)) {
+		/*
+		 * Ignore duplicate registrations (from dahdi_registration)
+		 * Until we completely migrate to dahdi_autoreg=1 and
+		 * hotplug-based span-assignments
+		 */
+		XBUS_DBG(DEVICES, xbus, "Already registered to DAHDI\n");
+		ret = 0;
+		goto out;
 	}
 	xbus->ddev = dahdi_create_device();
 	if (!xbus->ddev) {
@@ -1008,31 +1052,49 @@ int xbus_register_dahdi_device(xbus_t *xbus)
 			xpd_dahdi_postregister(xpd);
 		}
 	}
-	return 0;
+	ret = 0;
+out:
+	mutex_unlock(&dahdi_registration_mutex);
+	return ret;
 err:
 	xbus_free_ddev(xbus);
-	return ret;
+	goto out;
 }
 
 void xbus_unregister_dahdi_device(xbus_t *xbus)
 {
 	int i;
+	int ret;
 
-	XBUS_NOTICE(xbus, "%s\n", __func__);
+	XBUS_DBG(DEVICES, xbus, "%s\n", __func__);
+	ret = mutex_lock_interruptible(&dahdi_registration_mutex);
+	if (ret < 0) {
+		XBUS_ERR(xbus, "dahdi_registration_mutex already taken\n");
+		return;
+	}
+	if (!xbus_is_registered(xbus)) {
+		/*
+		 * Ignore duplicate unregistrations
+		 */
+		XBUS_DBG(DEVICES, xbus, "Already unregistered to DAHDI\n");
+		goto err;
+	}
 	for (i = 0; i < MAX_XPDS; i++) {
 		xpd_t *xpd = xpd_of(xbus, i);
 		xpd_dahdi_preunregister(xpd);
 	}
 	if (xbus->ddev) {
 		dahdi_unregister_device(xbus->ddev);
-		XBUS_NOTICE(xbus, "%s: finished dahdi_unregister_device()\n",
-			    __func__);
+		XBUS_DBG(DEVICES, xbus,
+			"%s: finished dahdi_unregister_device()\n", __func__);
 		xbus_free_ddev(xbus);
 	}
 	for (i = 0; i < MAX_XPDS; i++) {
 		xpd_t *xpd = xpd_of(xbus, i);
 		xpd_dahdi_postunregister(xpd);
 	}
+err:
+	mutex_unlock(&dahdi_registration_mutex);
 }
 
 /*
@@ -1100,7 +1162,7 @@ void xbus_populate(void *data)
 	 */
 	xbus_request_sync(xbus, SYNC_MODE_PLL);
 	elect_syncer("xbus_populate(end)");	/* FIXME: try to do it later */
-	if (dahdi_autoreg)
+	if (!dahdi_get_auto_assign_spans())
 		xbus_register_dahdi_device(xbus);
 out:
 	XBUS_DBG(DEVICES, xbus, "Leaving\n");
@@ -1158,8 +1220,7 @@ static void worker_reset(xbus_t *xbus)
 	name = (xbus) ? xbus->busname : "detached";
 	DBG(DEVICES, "%s\n", name);
 	if (!worker->xpds_init_done) {
-		NOTICE("%s: worker(%s)->xpds_init_done=%d\n", __func__, name,
-		       worker->xpds_init_done);
+		XBUS_NOTICE(xbus, "XPDS initialization was not finished\n");
 	}
 	spin_lock_irqsave(&worker->worker_lock, flags);
 	list_for_each_safe(card, next_card, &worker->card_list) {
@@ -1177,13 +1238,15 @@ static void worker_reset(xbus_t *xbus)
 	spin_unlock_irqrestore(&worker->worker_lock, flags);
 }
 
+/*
+ * Called only after worker_reset(xbus)
+ */
 static void worker_destroy(xbus_t *xbus)
 {
 	struct xbus_workqueue *worker;
 
 	BUG_ON(!xbus);
 	worker = &xbus->worker;
-	worker_reset(xbus);
 	XBUS_DBG(DEVICES, xbus, "Waiting for worker to finish...\n");
 	down(&worker->running_initialization);
 	XBUS_DBG(DEVICES, xbus, "Waiting for worker to finish -- done\n");
@@ -1236,6 +1299,7 @@ static int worker_run(xbus_t *xbus)
 	}
 	return 1;
 err:
+	worker_reset(xbus);
 	worker_destroy(xbus);
 	return 0;
 }
@@ -1403,6 +1467,7 @@ void xbus_disconnect(xbus_t *xbus)
 	del_timer_sync(&xbus->command_timer);
 	transportops_put(xbus);
 	transport_destroy(xbus);
+	/* worker_reset(xbus) was called in xbus_deactivate(xbus) */
 	worker_destroy(xbus);
 	XBUS_DBG(DEVICES, xbus, "Deactivated refcount_xbus=%d\n",
 		 refcount_xbus(xbus));
@@ -1452,6 +1517,7 @@ void xbus_free(xbus_t *xbus)
 	num = xbus->num;
 	BUG_ON(!xbuses_array[num].xbus);
 	BUG_ON(xbus != xbuses_array[num].xbus);
+	init_xbus(num, NULL);
 	spin_unlock_irqrestore(&xbuses_lock, flags);
 #ifdef CONFIG_PROC_FS
 	if (xbus->proc_xbus_dir) {
@@ -1478,7 +1544,6 @@ void xbus_free(xbus_t *xbus)
 #endif
 	spin_lock_irqsave(&xbuses_lock, flags);
 	XBUS_DBG(DEVICES, xbus, "Going to free...\n");
-	init_xbus(num, NULL);
 	spin_unlock_irqrestore(&xbuses_lock, flags);
 	KZFREE(xbus);
 }
@@ -1592,8 +1657,6 @@ static bool xpds_done(xbus_t *xbus)
 {
 	if (XBUS_IS(xbus, FAIL))
 		return 1;	/* Nothing to wait for */
-	if (!XBUS_IS(xbus, RECVD_DESC))
-		return 1;	/* We are not in the initialization phase */
 	if (xbus->worker.xpds_init_done)
 		return 1;	/* All good */
 	/* Keep waiting */
@@ -1611,10 +1674,6 @@ int waitfor_xpds(xbus_t *xbus, char *buf)
 	 * FIXME: worker is created before ?????
 	 * So by now it exists and initialized.
 	 */
-	/* until end of waitfor_xpds_show(): */
-	xbus = get_xbus(__func__, xbus->num);
-	if (!xbus)
-		return -ENODEV;
 	worker = &xbus->worker;
 	BUG_ON(!worker);
 	if (!worker->wq) {
@@ -1622,14 +1681,9 @@ int waitfor_xpds(xbus_t *xbus, char *buf)
 		len = -ENODEV;
 		goto out;
 	}
-	if (worker->num_units == 0) {
-		XBUS_ERR(xbus, "No cards. Skipping.\n");
-		goto out;
-	}
 	XBUS_DBG(DEVICES, xbus,
-		 "Waiting for card init of %d XPD's max %d seconds (%p)\n",
-		 worker->num_units, INITIALIZATION_TIMEOUT / HZ,
-		 &worker->wait_for_xpd_initialization);
+		 "Waiting for card init of XPDs max %d seconds\n",
+		 INITIALIZATION_TIMEOUT / HZ);
 	ret =
 	    wait_event_interruptible_timeout(worker->
 					     wait_for_xpd_initialization,
@@ -1658,7 +1712,6 @@ int waitfor_xpds(xbus_t *xbus, char *buf)
 		spin_unlock_irqrestore(&xbus->lock, flags);
 	}
 out:
-	put_xbus(__func__, xbus);	/* from start of waitfor_xpds_show() */
 	return len;
 }
 
@@ -1966,6 +2019,10 @@ int __init xbus_core_init(void)
 {
 	int ret = 0;
 
+	if (dahdi_autoreg == 1) {
+		NOTICE("WARNING: The dahdi_autoreg parameter is deprecated " \
+			"-- just set dahdi.auto_assign_spans=0\n");
+	}
 	initialize_xbuses_array();
 #ifdef PROTOCOL_DEBUG
 	INFO("FEATURE: with PROTOCOL_DEBUG\n");

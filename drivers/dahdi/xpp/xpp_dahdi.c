@@ -458,29 +458,28 @@ static void phonedev_cleanup(xpd_t *xpd)
 	unsigned int x;
 
 	for (x = 0; x < phonedev->channels; x++) {
-		if (phonedev->chans[x])
+		if (phonedev->chans[x]) {
 			KZFREE(phonedev->chans[x]);
-		if (phonedev->ec[x])
+			phonedev->chans[x] = NULL;
+		}
+		if (phonedev->ec[x]) {
 			KZFREE(phonedev->ec[x]);
+			phonedev->ec[x] = NULL;
+		}
 	}
+	phonedev->channels = 0;
 }
 
-__must_check static int phonedev_init(xpd_t *xpd,
-				      const xproto_table_t *proto_table,
-				      int channels, xpp_line_t no_pcm)
+int phonedev_alloc_channels(xpd_t *xpd, int channels)
 {
 	struct phonedev *phonedev = &PHONEDEV(xpd);
+	int old_channels = phonedev->channels;
 	unsigned int x;
 
-	spin_lock_init(&phonedev->lock_recompute_pcm);
+	XPD_DBG(DEVICES, xpd, "Reallocating channels: %d -> %d\n",
+			old_channels, channels);
+	phonedev_cleanup(xpd);
 	phonedev->channels = channels;
-	phonedev->no_pcm = no_pcm;
-	phonedev->offhook_state = 0x0;	/* ONHOOK */
-	phonedev->phoneops = proto_table->phoneops;
-	phonedev->digital_outputs = 0;
-	phonedev->digital_inputs = 0;
-	atomic_set(&phonedev->dahdi_registered, 0);
-	atomic_set(&phonedev->open_counter, 0);
 	for (x = 0; x < phonedev->channels; x++) {
 		if (!
 		    (phonedev->chans[x] =
@@ -501,6 +500,29 @@ err:
 	phonedev_cleanup(xpd);
 	return -ENOMEM;
 }
+EXPORT_SYMBOL(phonedev_alloc_channels);
+
+__must_check static int phonedev_init(xpd_t *xpd,
+				      const xproto_table_t *proto_table,
+				      int channels, xpp_line_t no_pcm)
+{
+	struct phonedev *phonedev = &PHONEDEV(xpd);
+
+	spin_lock_init(&phonedev->lock_recompute_pcm);
+	phonedev->no_pcm = no_pcm;
+	phonedev->offhook_state = 0x0;	/* ONHOOK */
+	phonedev->phoneops = proto_table->phoneops;
+	phonedev->digital_outputs = 0;
+	phonedev->digital_inputs = 0;
+	atomic_set(&phonedev->dahdi_registered, 0);
+	atomic_set(&phonedev->open_counter, 0);
+	if (phonedev_alloc_channels(xpd, channels) < 0)
+		goto err;
+	return 0;
+err:
+	return -ENOMEM;
+}
+
 
 /*
  * xpd_alloc - Allocator for new XPD's
@@ -692,15 +714,15 @@ EXPORT_SYMBOL(hookstate_changed);
 /*------------------------- Dahdi Interfaces -----------------------*/
 
 /*
- * Called from dahdi with spinlock held on chan. Must not call back
+ * Called with spinlock held on chan. Must not call back
  * dahdi functions.
  */
-int xpp_open(struct dahdi_chan *chan)
+static int _xpp_open(struct dahdi_chan *chan)
 {
 	xpd_t *xpd;
 	xbus_t *xbus;
 	int pos;
-	unsigned long flags;
+	int open_counter;
 
 	if (!chan) {
 		NOTICE("open called on a null chan\n");
@@ -721,31 +743,37 @@ int xpp_open(struct dahdi_chan *chan)
 		LINE_NOTICE(xpd, pos, "Cannot open -- device not ready\n");
 		return -ENODEV;
 	}
-	spin_lock_irqsave(&xbus->lock, flags);
-	atomic_inc(&PHONEDEV(xpd).open_counter);
+	open_counter = atomic_inc_return(&PHONEDEV(xpd).open_counter);
 	LINE_DBG(DEVICES, xpd, pos, "%s[%d]: open_counter=%d\n", current->comm,
-		 current->pid, atomic_read(&PHONEDEV(xpd).open_counter));
-	spin_unlock_irqrestore(&xbus->lock, flags);
+		 current->pid, open_counter);
 	if (PHONE_METHOD(card_open, xpd))
 		CALL_PHONE_METHOD(card_open, xpd, pos);
 	return 0;
+}
+
+int xpp_open(struct dahdi_chan *chan)
+{
+	unsigned long flags;
+	int res;
+	spin_lock_irqsave(&chan->lock, flags);
+	res = _xpp_open(chan);
+	spin_unlock_irqrestore(&chan->lock, flags);
+	return res;
 }
 EXPORT_SYMBOL(xpp_open);
 
 int xpp_close(struct dahdi_chan *chan)
 {
 	xpd_t *xpd = chan->pvt;
-	xbus_t *xbus = xpd->xbus;
 	int pos = chan->chanpos - 1;
-	unsigned long flags;
+	int open_counter;
 
-	spin_lock_irqsave(&xbus->lock, flags);
-	spin_unlock_irqrestore(&xbus->lock, flags);
 	if (PHONE_METHOD(card_close, xpd))
 		CALL_PHONE_METHOD(card_close, xpd, pos);
+	/* from xpp_open(): */
+	open_counter = atomic_dec_return(&PHONEDEV(xpd).open_counter);
 	LINE_DBG(DEVICES, xpd, pos, "%s[%d]: open_counter=%d\n", current->comm,
-		 current->pid, atomic_read(&PHONEDEV(xpd).open_counter));
-	atomic_dec(&PHONEDEV(xpd).open_counter);	/* from xpp_open() */
+		 current->pid, open_counter);
 	return 0;
 }
 EXPORT_SYMBOL(xpp_close);
@@ -1025,12 +1053,9 @@ EXPORT_SYMBOL(xpd_set_spanname);
 static void xpd_init_span(xpd_t *xpd, unsigned offset, int cn)
 {
 	struct dahdi_span *span;
-	int i;
 
 	memset(&PHONEDEV(xpd).span, 0, sizeof(struct dahdi_span));
-	for (i = 0; i < cn; i++)
-		memset(XPD_CHAN(xpd, i), 0, sizeof(struct dahdi_chan));
-
+	phonedev_alloc_channels(xpd, cn);
 	span = &PHONEDEV(xpd).span;
 	span->deflaw = DAHDI_LAW_MULAW;	/* card_* drivers may override */
 	span->channels = cn;
