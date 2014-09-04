@@ -30,6 +30,12 @@
 #include <linux/delay.h>
 #include <linux/version.h>
 #include <linux/slab.h>
+#include <linux/hrtimer.h>
+
+#include <linux/hrtimer.h>
+#define DAHDI_RATE 1000                    /* DAHDI ticks per second */
+#define DAHDI_TIME (1000000 / DAHDI_RATE)  /* DAHDI tick time in us */
+#define DAHDI_TIME_NS (DAHDI_TIME * 1000)  /* DAHDI tick time in ns */
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 26)
 #define HAVE_RATELIMIT
@@ -662,6 +668,25 @@ static void wcxb_hard_reset(struct wcxb *xb)
 		_wcxb_hard_reset(xb);
 }
 
+static int wcxb_polling_timer_fn(struct hrtimer *timer)
+{
+	irqreturn_t ret;
+	unsigned long flags;
+	unsigned long overrun;
+	struct wcxb *xb = container_of(timer, struct wcxb, timer);
+
+	overrun = hrtimer_forward(timer, timer->expires, ktime_set(0, DAHDI_TIME_NS));
+	if (overrun > 1) {
+		dev_info(&xb->pdev->dev, "hrtimer overrun %lu.\n", overrun);
+	}
+
+	local_irq_save(flags);
+	ret = _wcxb_isr(0, (void*)xb);
+	local_irq_restore(flags);
+
+	return HRTIMER_RESTART;
+}
+
 int wcxb_init(struct wcxb *xb, const char *board_name, u32 int_mode)
 {
 	int res = 0;
@@ -702,15 +727,22 @@ int wcxb_init(struct wcxb *xb, const char *board_name, u32 int_mode)
 	/* Enable writes to fpga status register */
 	iowrite32be(0, xb->membase + 0x04);
 
-	xb->flags.have_msi = (int_mode) ? 0 : (0 == pci_enable_msi(pdev));
+	if (3 != int_mode) {
+		xb->flags.have_msi = (int_mode) ? 0 : (0 == pci_enable_msi(pdev));
 
-	if (request_irq(pdev->irq, wcxb_isr,
-			(xb->flags.have_msi) ? 0 : DAHDI_IRQ_SHARED,
-			board_name, xb)) {
-		dev_notice(&xb->pdev->dev, "Unable to request IRQ %d\n",
-			   pdev->irq);
-		res = -EIO;
-		goto fail_exit;
+		if (request_irq(pdev->irq, wcxb_isr,
+				(xb->flags.have_msi) ? 0 : DAHDI_IRQ_SHARED,
+				board_name, xb)) {
+			dev_notice(&xb->pdev->dev, "Unable to request IRQ %d\n",
+				   pdev->irq);
+			res = -EIO;
+			goto fail_exit;
+		}
+	} else {
+		hrtimer_init(&xb->timer, CLOCK_MONOTONIC, HRTIMER_REL);
+		xb->timer.function = wcxb_polling_timer_fn;
+		xb->flags.using_timer = 1;
+		dev_info(&xb->pdev->dev, "Created high resolution polling timer.\n");
 	}
 
 	iowrite32be(0, xb->membase + TDM_CONTROL);
@@ -764,6 +796,11 @@ void wcxb_disable_interrupts(struct wcxb *xb)
 void wcxb_stop(struct wcxb *xb)
 {
 	unsigned long flags;
+
+	if (xb->flags.using_timer) {
+		hrtimer_cancel(&xb->timer);
+	}
+
 	spin_lock_irqsave(&xb->lock, flags);
 	/* Stop everything */
 	iowrite32be(0, xb->membase + TDM_CONTROL);
@@ -774,6 +811,7 @@ void wcxb_stop(struct wcxb *xb)
 	ioread32be(xb->membase);
 	spin_unlock_irqrestore(&xb->lock, flags);
 	synchronize_irq(xb->pdev->irq);
+
 }
 
 bool wcxb_is_stopped(struct wcxb *xb)
@@ -812,10 +850,12 @@ static void wcxb_free_dring(struct wcxb *xb)
 void wcxb_release(struct wcxb *xb)
 {
 	wcxb_stop(xb);
-	synchronize_irq(xb->pdev->irq);
-	free_irq(xb->pdev->irq, xb);
-	if (xb->flags.have_msi)
-		pci_disable_msi(xb->pdev);
+	if (!xb->flags.using_timer) {
+		synchronize_irq(xb->pdev->irq);
+		free_irq(xb->pdev->irq, xb);
+		if (xb->flags.have_msi)
+			pci_disable_msi(xb->pdev);
+	}
 	if (xb->membase)
 		pci_iounmap(xb->pdev, xb->membase);
 	wcxb_free_dring(xb);
@@ -829,13 +869,22 @@ int wcxb_start(struct wcxb *xb)
 	u32 reg;
 	unsigned long flags;
 
+	if (xb->flags.using_timer) {
+		hrtimer_start(&xb->timer, ktime_set(0, DAHDI_TIME_NS), HRTIMER_REL);
+	}
+
 	spin_lock_irqsave(&xb->lock, flags);
 	_wcxb_reset_dring(xb);
 	/* Enable hardware interrupts */
 	iowrite32be(-1, xb->membase + IAR);
 	iowrite32be(DESC_UNDERRUN|DESC_COMPLETE, xb->membase + IER);
 	/* iowrite32be(0x3f7, xb->membase + IER); */
-	iowrite32be(MER_ME|MER_HIE, xb->membase + MER);
+
+	if (!xb->flags.using_timer) {
+		iowrite32be(MER_ME|MER_HIE, xb->membase + MER);
+	} else {
+		iowrite32be(MER_HIE, xb->membase + MER);
+	}
 
 	/* Start the DMA engine processing. */
 	reg = ioread32be(xb->membase + TDM_CONTROL);

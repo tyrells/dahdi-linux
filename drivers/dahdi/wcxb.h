@@ -67,6 +67,7 @@ struct wcxb {
 		u32	is_pcie:1;
 #endif
 		u32	io_error:1;
+		u32	using_timer:1;
 	} flags;
 	void __iomem			*membase;
 	struct wcxb_meta_desc		*meta_dring;
@@ -76,6 +77,8 @@ struct wcxb {
 	dma_addr_t			hw_dring_phys;
 	struct dma_pool			*pool;
 	unsigned long			framecount;
+		
+	struct hrtimer			timer;
 #ifdef DEBUG
 	u8				last_retry_count;
 #endif
