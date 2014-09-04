@@ -217,6 +217,7 @@ static struct wcxb_operations xb_ops = {
 		       DAHDI_ALARM_LOOPBACK)
 
 static int debug;
+static int int_mode;
 static int timingcable;
 static int force_firmware;
 static int alarmdebounce	= 2500; /* LOF/LFA def to 2.5s AT&T TR54016*/
@@ -3422,7 +3423,7 @@ static int __devinit t43x_init_one(struct pci_dev *pdev,
 	wc->xb.ops = &xb_ops;
 	wc->xb.debug = &debug;
 
-	res = wcxb_init(&wc->xb, KBUILD_MODNAME, 0);
+	res = wcxb_init(&wc->xb, KBUILD_MODNAME, int_mode);
 	if (res)
 		goto fail_exit;
 
@@ -3678,6 +3679,9 @@ static void __exit t43x_cleanup(void)
 	pci_unregister_driver(&t43x_driver);
 }
 
+module_param(int_mode, int, 0400);
+MODULE_PARM_DESC(int_mode,
+	"0 = Use MSI interrupt if available. 1 = Legacy interrupt only.\n");
 module_param(debug, int, S_IRUGO | S_IWUSR);
 module_param(timingcable, int, 0600);
 module_param(default_linemode, charp, S_IRUGO);
