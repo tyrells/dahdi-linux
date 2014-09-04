@@ -177,6 +177,7 @@ static struct wcxb_operations xb_ops = {
 #define FRAMER_BASE	0x00000800	/* framer's address space */
 
 static int debug;
+static int int_mode;
 static int alarmdebounce = 2500; /* LOF/LFA def to 2.5s AT&T TR54016*/
 static int losalarmdebounce = 2500; /* LOS def to 2.5s AT&T TR54016*/
 static int aisalarmdebounce = 2500; /* AIS(blue) def to 2.5s AT&T TR54016*/
@@ -2616,7 +2617,7 @@ static int __devinit te13xp_init_one(struct pci_dev *pdev,
 	wc->xb.pdev = pdev;
 	wc->xb.ops = &xb_ops;
 	wc->xb.debug = &debug;
-	res = wcxb_init(&wc->xb, wc->name, 0);
+	res = wcxb_init(&wc->xb, wc->name, int_mode);
 	if (res)
 		goto fail_exit;
 
@@ -2810,6 +2811,9 @@ static void __exit te13xp_cleanup(void)
 	pci_unregister_driver(&te13xp_driver);
 }
 
+module_param(int_mode, int, 0400);
+MODULE_PARM_DESC(int_mode,
+	"0 = Use MSI interrupt if available. 1 = Legacy interrupt only.\n");
 module_param(debug, int, S_IRUGO | S_IWUSR);
 module_param(default_linemode, charp, S_IRUGO);
 MODULE_PARM_DESC(default_linemode, "\"t1\"(default), \"e1\", or \"j1\".");
