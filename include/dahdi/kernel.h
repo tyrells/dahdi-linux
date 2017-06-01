@@ -60,6 +60,12 @@
 
 #define dahdi_pci_module pci_register_driver
 
+#if 0
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#include <linux/sched/signal.h>
+#endif /* 4.11.0 */
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 #define DAHDI_IRQ_HANDLER(a) static irqreturn_t a(int irq, void *dev_id)
 #else
