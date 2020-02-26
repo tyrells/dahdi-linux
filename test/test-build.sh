@@ -33,6 +33,9 @@ rm -fr /root/code
 cp -fr /source /root/code
 cd /root/code
 
+# Save the .tar.gz files so we do not have to download them again
+git clean -q -ffdx -e '*.tar.gz'
+
 for KSRC in $KERNELS ; do
   echo "Building against $KSRC"
   export KSRC=$KSRC
