@@ -126,6 +126,21 @@ config DAHDI_VOICEBUS
 
 	   If unsure, say Y.
 
+config DAHDI_WCTDM
+        tristate "Digium Wildcard TDM400P"
+        depends on DAHDI && DAHDI_VOICEBUS
+        default DAHDI
+        ---help---
+          This driver provides support for the following Digium
+          Wildcard products:
+
+          * TDM400P (PCI/PCI-X)
+
+          To compile this driver as a module, choose M here: the
+          module will be called wctdm.
+
+          If unsure, say Y.
+
 config DAHDI_WCTDM24XXP
 	tristate "Digium Wildcard VoiceBus analog card Support"
 	depends on DAHDI && DAHDI_VOICEBUS
